@@ -1,0 +1,7 @@
+
+ib-insync==0.9.86
+pandas>=2.2
+numpy>=2.0
+pytz
+python-dotenv
+loguru
