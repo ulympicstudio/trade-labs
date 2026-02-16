@@ -7,7 +7,12 @@ from src.signals.market_scanner import scan_us_most_active_stocks
 from src.signals.score_candidates import score_scan_results
 
 
-def get_trade_intents_from_scan(ib: IB, limit: int = 10) -> List[TradeIntent]:
+def get_trade_intents_from_scan(
+    ib: IB,
+    limit: int = 30,
+    score_limit: int = 20,
+    top_n: int = 5,
+) -> List[TradeIntent]:
     """
     Market-scanning v2 (with scoring):
     - Scan MOST_ACTIVE US stocks
@@ -15,10 +20,10 @@ def get_trade_intents_from_scan(ib: IB, limit: int = 10) -> List[TradeIntent]:
     - Return top N by score as TradeIntents
     """
     scan = scan_us_most_active_stocks(ib, limit=limit)
-    scored = score_scan_results(ib, scan)
+    scored = score_scan_results(ib, scan, top_n=top_n, max_scan=score_limit)
     
     # Take top N by score (only those with score > 0)
-    top_candidates = [s for s in scored if s.score > 0][:5]
+    top_candidates = [s for s in scored if s.score > 0][:top_n]
     
     intents: List[TradeIntent] = []
     for candidate in top_candidates:

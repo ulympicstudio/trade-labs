@@ -29,6 +29,7 @@ class TradeHistoryDB:
         
         self.runs_file = self.db_dir / "runs.json"
         self.trades_file = self.db_dir / "trades.json"
+        self.candidates_file = self.db_dir / "candidates.json"
     
     def _load_json(self, file_path: Path) -> List[Dict[str, Any]]:
         """Load JSON file, return empty list if not found."""
@@ -111,6 +112,41 @@ class TradeHistoryDB:
         self._save_json(self.trades_file, trades)
         
         return trade_record
+
+    def record_candidate(
+        self,
+        run_id: str,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        quantity: int,
+        stop_loss: float,
+        rationale: str,
+        backend: str,
+        armed: bool,
+        timestamp: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a suggested trade candidate (non-executed)."""
+
+        candidate_record = {
+            "run_id": run_id,
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry_price,
+            "quantity": quantity,
+            "stop_loss": stop_loss,
+            "rationale": rationale,
+            "backend": backend,
+            "armed": armed,
+            "timestamp": timestamp or datetime.utcnow().isoformat(),
+            "status": "SUGGESTED",
+        }
+
+        candidates = self._load_json(self.candidates_file)
+        candidates.append(candidate_record)
+        self._save_json(self.candidates_file, candidates)
+
+        return candidate_record
     
     def close_trade(
         self,
@@ -163,6 +199,11 @@ class TradeHistoryDB:
             trades = [t for t in trades if t["status"] == status]
         
         return trades
+
+    def get_candidate_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent suggested candidates."""
+        candidates = self._load_json(self.candidates_file)
+        return candidates[-limit:]
     
     def get_daily_summary(self, date: Optional[str] = None) -> Dict[str, Any]:
         """Get PnL summary for a date."""

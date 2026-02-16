@@ -13,13 +13,23 @@ class ScoredCandidate:
     momentum_pct_60m: float
     atr14: float
     score: float
+    reason: str
 
 
 LEVERAGED_OR_INVERSE_BLOCKLIST = {
     "TQQQ", "SQQQ", "SOXL", "SOXS", "TNA", "TZA",
     "SPXL", "SPXS", "UVXY", "SVXY", "ZSL", "UGL",
-    "TSLL", "TSLS", "UVIX", "DUST"
+    "TSLL", "TSLS", "UVIX", "DUST",
 }
+
+ETF_ALLOWLIST = {"SPY", "QQQ"}
+ETF_BLOCKLIST = {"BITO"}
+
+
+# ---- HARD FILTERS (tune anytime) ----
+MIN_PRICE = 5.0
+MIN_ATR14 = 0.25
+MIN_AVG_DOLLAR_VOL_20D = 25_000_000  # $25M/day average dollar volume
 
 
 def _contract(symbol: str) -> Stock:
@@ -41,6 +51,22 @@ def _atr14_from_daily(df: pd.DataFrame) -> float:
     return float(atr.iloc[-1]) if not atr.empty else float("nan")
 
 
+def _avg_dollar_volume_20d(df: pd.DataFrame) -> float:
+    # IB daily bars include volume. Dollar volume ~ close * volume.
+    if df is None or df.empty:
+        return float("nan")
+    d = df.tail(20).copy()
+    if "volume" not in d.columns:
+        return float("nan")
+    return float((d["close"].astype(float) * d["volume"].astype(float)).mean())
+
+
+def _last_close(df: pd.DataFrame) -> float:
+    if df is None or df.empty:
+        return float("nan")
+    return float(df["close"].astype(float).iloc[-1])
+
+
 def _momentum_pct_60m(df_1m: pd.DataFrame) -> float:
     if df_1m is None or df_1m.empty:
         return float("nan")
@@ -58,11 +84,11 @@ def _get_intraday_1m(ib: IB, symbol: str) -> pd.DataFrame:
     c = _contract(symbol)
     ib.qualifyContracts(c)
 
-    # ✅ Correct format: integer + SPACE + unit
+    # 2 hours of 1-min bars = 7200 seconds (IB duration units must be S/D/W/M/Y)
     bars = ib.reqHistoricalData(
         c,
         endDateTime="",
-        durationStr="2 H",
+        durationStr="7200 S",
         barSizeSetting="1 min",
         whatToShow="TRADES",
         useRTH=False,
@@ -76,7 +102,6 @@ def _get_daily_30d(ib: IB, symbol: str) -> pd.DataFrame:
     c = _contract(symbol)
     ib.qualifyContracts(c)
 
-    # ✅ Correct format: integer + SPACE + unit
     bars = ib.reqHistoricalData(
         c,
         endDateTime="",
@@ -90,52 +115,72 @@ def _get_daily_30d(ib: IB, symbol: str) -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
 
 
-def score_scan_results(ib: IB, scan_results: List, top_n: int = 5) -> List[ScoredCandidate]:
+def score_scan_results(
+    ib: IB,
+    scan_results: List,
+    top_n: int = 5,
+    max_scan: int = 20,
+) -> List[ScoredCandidate]:
     """
-    Momentum hyper-swing scoring:
-    - 60m momentum % (dominant)
-    - ATR14 (swing potential boost)
-    Uses historical bars only (avoids streaming quote entitlement problems).
+    Hyper-swing momentum scoring with HARD liquidity filters.
+    Uses historical bars only (stable, avoids streaming issues).
     """
     scored: List[ScoredCandidate] = []
 
-    for r in scan_results:
+    for r in scan_results[:max_scan]:
         sym = getattr(r, "symbol", None)
         rank = int(getattr(r, "rank", 9999))
         if not sym:
             continue
 
-        # skip leveraged/inverse products by default
         if sym in LEVERAGED_OR_INVERSE_BLOCKLIST:
             continue
 
+        if sym in ETF_BLOCKLIST and sym not in ETF_ALLOWLIST:
+            continue
+
         try:
+            # Pull daily first for filters (cheaper than intraday sometimes)
+            df_d = _get_daily_30d(ib, sym)
+            px = _last_close(df_d)
+            atr14 = _atr14_from_daily(df_d)
+            adv20 = _avg_dollar_volume_20d(df_d)
+
+            # HARD filters
+            if math.isnan(px) or px < MIN_PRICE:
+                continue
+            if math.isnan(adv20) or adv20 < MIN_AVG_DOLLAR_VOL_20D:
+                continue
+            if math.isnan(atr14) or atr14 < MIN_ATR14:
+                continue
+
+            # Momentum (60 minutes)
             df_1m = _get_intraday_1m(ib, sym)
             mom = _momentum_pct_60m(df_1m)
             if math.isnan(mom):
                 continue
 
-            df_d = _get_daily_30d(ib, sym)
-            atr14 = _atr14_from_daily(df_d)
-            if math.isnan(atr14):
-                atr14 = 0.0
-
-            # Score: momentum dominates, ATR adds swing preference
+            # Score: momentum dominates; ATR gives swing preference
             score = (mom * 10.0) + (atr14 * 0.25)
+
+            reason = (
+                f"Momentum60m={mom:.2f}% | ATR14={atr14:.2f} | "
+                f"LastClose=${px:.2f} | ADV20=${adv20/1e6:.1f}M | score={score:.2f}"
+            )
 
             scored.append(ScoredCandidate(
                 symbol=sym,
                 rank=rank,
                 momentum_pct_60m=mom,
                 atr14=atr14,
-                score=score
+                score=score,
+                reason=reason
             ))
 
             # throttle to reduce IB cancellations
-            ib.sleep(0.25)
+            ib.sleep(0.30)
 
         except Exception:
-            # Skip any symbol that IB rejects (bad contracts, throttling, etc.)
             continue
 
     scored.sort(key=lambda x: x.score, reverse=True)

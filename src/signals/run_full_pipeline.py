@@ -1,4 +1,6 @@
 import math
+import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 from ib_insync import IB, Stock, util
@@ -7,6 +9,7 @@ import pandas as pd
 from config.identity import SYSTEM_NAME, HUMAN_NAME
 from src.data.ib_market_data import connect_ib, get_account_equity_usd
 from src.signals.signal_engine import get_trade_intents_from_scan
+from src.utils.trade_history_db import TradeHistoryDB
 
 
 # ---------- Helpers: Historical-only pricing (avoids 10089 spam) ----------
@@ -122,10 +125,23 @@ def run_full_pipeline(
         created_ib = True
 
     try:
-        if logger and hasattr(logger, "scan_started"):
-            logger.scan_started()
+        run_id = str(uuid.uuid4())[:8]
+        backend = os.getenv("TRADE_LABS_EXECUTION_BACKEND", "SIM")
+        armed = os.getenv("TRADE_LABS_ARMED", "0") == "1"
+        db = TradeHistoryDB("data/trade_history")
 
-        intents = get_trade_intents_from_scan(ib, limit=50)
+        if logger and hasattr(logger, "scan_started"):
+            logger.scan_started(run_id)
+
+        scan_limit = int(kwargs.get("scan_limit", 30))
+        score_limit = int(kwargs.get("score_limit", 20))
+        top_n = int(kwargs.get("top_n", 5))
+        intents = get_trade_intents_from_scan(
+            ib,
+            limit=scan_limit,
+            score_limit=score_limit,
+            top_n=top_n,
+        )
 
         if use_spy_only:
             intents = [i for i in intents if i.symbol == "SPY"]
@@ -164,6 +180,7 @@ def run_full_pipeline(
                     raise RuntimeError("ATR unavailable")
 
                 shares = size_shares(equity, risk_pct, atr14, atr_mult=atr_mult)
+                stop_price = entry_price - (atr14 * atr_mult)
 
                 print(f"Entry Price (1m bars): ${entry_price:.2f}")
                 print(f"ATR(14): {atr14:.4f}")
@@ -171,22 +188,78 @@ def run_full_pipeline(
                 if shares <= 0:
                     print("✗ Skipped: shares computed as 0")
                     if logger and hasattr(logger, "execution_completed"):
-                        logger.execution_completed()
+                        logger.execution_completed(
+                            run_id=run_id,
+                            symbol=intent.symbol,
+                            shares=0,
+                            entry_price=entry_price,
+                            stop_loss=stop_price,
+                            order_id=None,
+                            ok=False,
+                            reason="shares computed as 0",
+                        )
                     continue
 
-                print(f"✓ Success: {shares} shares @ ${entry_price:.2f}")
+                print(f"✓ Suggested: {shares} shares @ ${entry_price:.2f}")
                 successful += 1
+                db.record_candidate(
+                    run_id=run_id,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    entry_price=entry_price,
+                    quantity=shares,
+                    stop_loss=stop_price,
+                    rationale=intent.rationale,
+                    backend=backend,
+                    armed=armed,
+                )
 
             except Exception as e:
                 print(f"✗ Error: {e}")
 
+                if logger and hasattr(logger, "execution_completed"):
+                    logger.execution_completed(
+                        run_id=run_id,
+                        symbol=intent.symbol,
+                        shares=0,
+                        entry_price=0.0,
+                        stop_loss=0.0,
+                        order_id=None,
+                        ok=False,
+                        reason=str(e)[:80],
+                    )
+                continue
+
             if logger and hasattr(logger, "execution_completed"):
-                logger.execution_completed()
+                logger.execution_completed(
+                    run_id=run_id,
+                    symbol=intent.symbol,
+                    shares=shares,
+                    entry_price=entry_price,
+                    stop_loss=stop_price,
+                    order_id=None,
+                    ok=True,
+                    reason="suggested",
+                )
 
             ib.sleep(0.15)
 
         if logger and hasattr(logger, "pipeline_completed"):
-            logger.pipeline_completed()
+            logger.pipeline_completed(run_id, executed, successful)
+
+        db.record_pipeline_run(
+            run_id=run_id,
+            backend=backend,
+            armed=armed,
+            num_candidates_scanned=scan_limit,
+            num_candidates_executed=executed,
+            num_successful=successful,
+            details={
+                "scan_limit": scan_limit,
+                "score_limit": score_limit,
+                "use_spy_only": use_spy_only,
+            },
+        )
 
         print("\n" + "=" * 60)
         print("PIPELINE COMPLETE")
@@ -194,7 +267,13 @@ def run_full_pipeline(
         print(f"Executed: {executed} candidates  |  Successful: {successful}")
         print("=" * 60 + "\n")
 
-        return {"ok": True, "candidates": [i.symbol for i in intents], "executed": executed, "successful": successful}
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "candidates": [i.symbol for i in intents],
+            "executed": executed,
+            "successful": successful,
+        }
 
     finally:
         if created_ib and ib is not None:
