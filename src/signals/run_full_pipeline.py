@@ -133,8 +133,8 @@ def run_full_pipeline(
         if logger and hasattr(logger, "scan_started"):
             logger.scan_started(run_id)
 
-        scan_limit = int(kwargs.get("scan_limit", 30))
-        score_limit = int(kwargs.get("score_limit", 20))
+        scan_limit = int(kwargs.get("scan_limit", 20))
+        score_limit = int(kwargs.get("score_limit", 15))
         top_n = int(kwargs.get("top_n", 5))
         intents = get_trade_intents_from_scan(
             ib,

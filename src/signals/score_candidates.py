@@ -119,7 +119,7 @@ def score_scan_results(
     ib: IB,
     scan_results: List,
     top_n: int = 5,
-    max_scan: int = 20,
+    max_scan: int = 15,
 ) -> List[ScoredCandidate]:
     """
     Hyper-swing momentum scoring with HARD liquidity filters.
@@ -178,7 +178,7 @@ def score_scan_results(
             ))
 
             # throttle to reduce IB cancellations
-            ib.sleep(0.30)
+            ib.sleep(0.50)
 
         except Exception:
             continue

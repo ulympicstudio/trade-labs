@@ -9,8 +9,8 @@ from src.signals.score_candidates import score_scan_results
 
 def get_trade_intents_from_scan(
     ib: IB,
-    limit: int = 30,
-    score_limit: int = 20,
+    limit: int = 20,
+    score_limit: int = 15,
     top_n: int = 5,
 ) -> List[TradeIntent]:
     """
