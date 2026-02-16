@@ -17,3 +17,5 @@ loguru
 # Note: For earnings calendar features, get a free Finnhub API key at:
 # https://finnhub.io/register
 # Set with: export FINNHUB_API_KEY='your_key'
+apscheduler
+apscheduler
