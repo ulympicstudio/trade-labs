@@ -171,33 +171,122 @@ class TradeLabsOrchestrator:
             report_fn=self.generate_daily_report,
         )
         return self.scheduler
-    
-    def start_scheduler(self):
-        """Start the scheduler."""
-        if self.scheduler is None:
-            self.create_scheduler()
-        
-        self.scheduler.start()
-        self._display_menu()
-    
-    def stop_scheduler(self):
-        """Stop the scheduler."""
-        if self.scheduler:
-            self.scheduler.stop()
-    
-    def _display_menu(self):
-        """Display interactive menu."""
-        print("\n" + "="*60)
-        print("Trade Labs Scheduler Running ✓")
-        print("="*60)
-        print("\nScheduler is running in background. Available commands:\n")
-        print("  status    - Show scheduler status")
-        print("  run       - Run pipeline now")
-        print("  report    - Generate report now")
-        print("  reconcile - Reconcile positions now")
-        print("  stats     - Show trading stats")
-        print("  quit      - Stop scheduler and exit")
-        print("\nEnter command (or 'quit' to exit):\n")
+
+
+# ----------------------------
+# Scheduler interactive methods
+# ----------------------------
+
+def _scheduler_status(orchestrator):
+    """
+    Print scheduled jobs if available.
+    Works with APScheduler under the hood.
+    """
+    sched = getattr(orchestrator, "scheduler", None)
+    if sched is None:
+        print("Scheduler not initialized.")
+        return
+
+    # Many wrappers store the APScheduler instance as .scheduler
+    aps = getattr(sched, "scheduler", None)
+    if aps is not None and hasattr(aps, "get_jobs"):
+        jobs = aps.get_jobs()
+        print("\nScheduled Jobs:")
+        for j in jobs:
+            print(f"- {j.id} | next_run={j.next_run_time}")
+        print("")
+        return
+
+    # Fallback if wrapper exposes get_jobs
+    if hasattr(sched, "get_jobs"):
+        jobs = sched.get_jobs()
+        print("\nScheduled Jobs:")
+        for j in jobs:
+            print(j)
+        print("")
+        return
+
+    print("Status not available for this scheduler object.")
+
+
+def start_scheduler(self):
+    """
+    Start the scheduler and enter interactive command loop.
+    This keeps the process alive so you can type: status/run/report/reconcile/stats/quit
+    """
+    if getattr(self, "scheduler", None) is None:
+        self.create_scheduler()
+
+    self.scheduler.start()
+    self._display_menu()
+
+    try:
+        while True:
+            cmd = input("> ").strip().lower()
+
+            if cmd in ("quit", "exit", "q"):
+                print("Stopping scheduler...")
+                self.stop_scheduler()
+                print("Scheduler stopped.")
+                break
+
+            elif cmd == "status":
+                _scheduler_status(self)
+
+            elif cmd == "run":
+                print("Running pipeline now...")
+                # candidates default to 5, adjust as desired
+                self.run_pipeline(num_candidates=5)
+
+            elif cmd == "report":
+                print("Generating report now...")
+                self.generate_daily_report()
+
+            elif cmd == "reconcile":
+                print("Reconciling positions now...")
+                self.reconcile_positions()
+
+            elif cmd == "stats":
+                print("Showing stats...")
+                self.display_stats()
+
+            elif cmd == "":
+                continue
+
+            else:
+                print("Unknown command. Try: status | run | report | reconcile | stats | quit")
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C received. Stopping scheduler...")
+        self.stop_scheduler()
+        print("Scheduler stopped.")
+
+
+def stop_scheduler(self):
+    """Stop the scheduler."""
+    if getattr(self, "scheduler", None):
+        self.scheduler.stop()
+
+
+def _display_menu(self):
+    """Display interactive menu."""
+    print("\n" + "="*60)
+    print("Trade Labs Scheduler Running ✓")
+    print("="*60)
+    print("\nScheduler is running. Available commands:\n")
+    print("  status    - Show scheduler status")
+    print("  run       - Run pipeline now")
+    print("  report    - Generate report now")
+    print("  reconcile - Reconcile positions now")
+    print("  stats     - Show trading stats")
+    print("  quit      - Stop scheduler and exit")
+    print("\nEnter command (or 'quit' to exit):\n")
+
+
+# Attach methods back onto TradeLabsOrchestrator class (in case they were removed)
+TradeLabsOrchestrator.start_scheduler = start_scheduler
+TradeLabsOrchestrator.stop_scheduler = stop_scheduler
+TradeLabsOrchestrator._display_menu = _display_menu
 
 
 def main():
