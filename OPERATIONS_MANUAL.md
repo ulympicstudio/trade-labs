@@ -68,6 +68,11 @@ cd /Users/umronalkotob/trade-labs
 
 ### Step 4: Run Trade Labs
 ```bash
+/opt/miniconda3/bin/conda run -p /opt/miniconda3/envs/trade-labs --no-capture-output python run_hybrid_trading.py
+```
+
+**If you are not using conda:**
+```bash
 python run_hybrid_trading.py
 ```
 
