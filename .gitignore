@@ -6,3 +6,9 @@ logs/
 .venv/
 .ipynb_checkpoints/
 .env
+
+# Trade Labs run artifacts
+data/trade_history/
+logs/
+*.jsonl
+hybrid_scan_*.json
