@@ -6,15 +6,15 @@ from ib_insync import IB, Stock, MarketOrder, StopOrder
 
 from config.runtime import is_paper, execution_backend, is_armed
 
-FINGERPRINT = "ORDERS_PY_ARM_GATE_V1"
+FINGERPRINT = "ORDERS_SAFE_GATE_V1"
 
 
 @dataclass
 class OrderRequest:
     symbol: str
-    side: str
+    side: str          # "BUY" or "SELL"
     quantity: int
-    order_type: str
+    order_type: str    # "MKT" (MVP)
     stop_loss: Optional[float] = None
 
 
@@ -46,26 +46,53 @@ def place_order(req: OrderRequest, ib: Optional[IB] = None) -> OrderResult:
     backend = execution_backend()
     armed = is_armed()
 
-    # Never allow LIVE
+    # Hard block LIVE forever for now
     if not is_paper():
-        return OrderResult(False, mode, backend, armed, req.symbol, req.side, req.quantity,
-                          req.order_type, req.stop_loss, ts, "LIVE mode blocked.")
+        return OrderResult(
+            ok=False, mode=mode, backend=backend, armed=armed,
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            order_type=req.order_type, stop_loss=req.stop_loss,
+            timestamp=ts,
+            message="LIVE mode blocked (not enabled)."
+        )
 
-    # SIM is always safe
+    # SAFE DEFAULT: SIM always allowed, never hits broker
     if backend == "SIM":
-        return OrderResult(True, mode, backend, armed, req.symbol, req.side, req.quantity,
-                          req.order_type, req.stop_loss, ts, "SIM order accepted (no broker submission).")
+        return OrderResult(
+            ok=True, mode=mode, backend=backend, armed=armed,
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            order_type=req.order_type, stop_loss=req.stop_loss,
+            timestamp=ts,
+            message="SIM order accepted (no broker submission)."
+        )
 
-    # IB requires explicit ARM switch
+    # IB backend requires ARMED=1
     if backend == "IB" and not armed:
-        return OrderResult(False, mode, backend, armed, req.symbol, req.side, req.quantity,
-                          req.order_type, req.stop_loss, ts,
-                          "BLOCKED: TRADE_LABS_ARMED=0. Set TRADE_LABS_ARMED=1 to allow IB paper orders.")
+        return OrderResult(
+            ok=False, mode=mode, backend=backend, armed=armed,
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            order_type=req.order_type, stop_loss=req.stop_loss,
+            timestamp=ts,
+            message="BLOCKED: TRADE_LABS_ARMED=0. Set TRADE_LABS_ARMED=1 to allow IB paper orders."
+        )
 
-    if backend == "IB" and ib is None:
-        return OrderResult(False, mode, backend, armed, req.symbol, req.side, req.quantity,
-                          req.order_type, req.stop_loss, ts,
-                          "IB backend requires an active IB connection passed in.")
+    if backend != "IB":
+        return OrderResult(
+            ok=False, mode=mode, backend=backend, armed=armed,
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            order_type=req.order_type, stop_loss=req.stop_loss,
+            timestamp=ts,
+            message=f"Unknown backend: {backend}"
+        )
+
+    if ib is None:
+        return OrderResult(
+            ok=False, mode=mode, backend=backend, armed=armed,
+            symbol=req.symbol, side=req.side, quantity=req.quantity,
+            order_type=req.order_type, stop_loss=req.stop_loss,
+            timestamp=ts,
+            message="IB backend requires an active IB connection passed in."
+        )
 
     # ---- REAL IB PAPER ORDER SUBMISSION ----
     contract = _make_contract(req.symbol)
@@ -88,7 +115,12 @@ def place_order(req: OrderRequest, ib: Optional[IB] = None) -> OrderResult:
         ib.sleep(1.0)
         stop_id = stop_order.orderId
 
-    return OrderResult(True, mode, backend, armed, req.symbol, req.side, req.quantity,
-                      req.order_type, req.stop_loss, ts,
-                      "IB PAPER order submitted (check TWS).",
-                      parent_order_id=parent_id, stop_order_id=stop_id)
+    return OrderResult(
+        ok=True, mode=mode, backend=backend, armed=armed,
+        symbol=req.symbol, side=req.side, quantity=req.quantity,
+        order_type=req.order_type, stop_loss=req.stop_loss,
+        timestamp=ts,
+        message="IB PAPER order submitted (check TWS).",
+        parent_order_id=parent_id,
+        stop_order_id=stop_id
+    )

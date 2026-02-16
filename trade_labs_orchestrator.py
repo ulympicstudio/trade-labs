@@ -47,6 +47,10 @@ class TradeLabsOrchestrator:
         self.scheduler = None
         
         # Setup logging
+        import inspect as _insp
+        import src.utils.log_manager as _lm
+        print(f"[DIAG] log_manager loaded from: {_lm.__file__}")
+        print(f"[DIAG] setup_logging signature: {_insp.signature(_lm.setup_logging)}")
         setup_logging(
             "trade_labs_orchestrator",
             log_dir=self.config.get("log_dir", "logs/pipeline"),

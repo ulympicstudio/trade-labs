@@ -11,18 +11,21 @@ class ScanResult:
 
 
 LEVERAGED_OR_INVERSE_BLOCKLIST = {
-    # common leveraged/inverse ETFs; we can expand later
     "TQQQ", "SQQQ", "SOXL", "SOXS", "TNA", "TZA",
     "SPXL", "SPXS", "UVXY", "SVXY", "ZSL", "UGL",
 }
 
 
 def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
+    """
+    IBKR scanner: most active US stocks/ETFs by volume.
+    """
     sub = ScannerSubscription(
         instrument="STK",
         locationCode="STK.US.MAJOR",
         scanCode="MOST_ACTIVE",
     )
+
     results = ib.reqScannerData(sub)
     out: List[ScanResult] = []
     for r in results[:limit]:
@@ -31,9 +34,14 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
     return out
 
 
+# Backwards-compatible name expected by orchestrator code:
+def scan_us_most_active_stocks(ib: IB, limit: int = 50) -> List[ScanResult]:
+    return scan_us_most_active(ib, limit=limit)
+
+
 def get_quote(ib: IB, symbol: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Snapshot quote: returns (bid, ask, last) as floats when available.
+    Snapshot quote (bid/ask/last).
     """
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)
@@ -55,6 +63,12 @@ def passes_quality_filters(
     max_spread_pct: float = 0.0015,  # 0.15%
     block_leveraged_etfs: bool = True,
 ) -> bool:
+    """
+    Filters out:
+    - leveraged/inverse ETFs (default)
+    - penny stocks (default min $5)
+    - wide spreads
+    """
     if block_leveraged_etfs and symbol in LEVERAGED_OR_INVERSE_BLOCKLIST:
         return False
 

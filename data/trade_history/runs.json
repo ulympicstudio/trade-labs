@@ -28,5 +28,23 @@
     "details": {
       "test": true
     }
+  },
+  {
+    "run_id": "7b27855c",
+    "timestamp": "2026-02-16T07:27:01.962715",
+    "backend": "SIM",
+    "armed": false,
+    "stats": {
+      "scanned": 5,
+      "executed": 5,
+      "successful": 0,
+      "failed": 5
+    },
+    "details": {
+      "account_equity": 998856.63,
+      "open_risk": 0.0,
+      "spy_atr": 9.025000000000002,
+      "use_spy_only": false
+    }
   }
 ]
