@@ -1,14 +1,8 @@
-"""IB connection configuration values loaded from environment."""
-from dotenv import load_dotenv
-import os
+# config/ib_config.py
+# Single source of truth for IB connection settings
 
+HOST = "127.0.0.1"
+PORT = 7497      # Paper TWS port
+CLIENT_ID = 13   # Change if you see "client id already in use"
 
-# Load from .env if present
-load_dotenv()
-
-# Defaults match common TWS paper defaults
-IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT = int(os.getenv("IB_PORT", 7497))
-IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", 1))
-
-__all__ = ["IB_HOST", "IB_PORT", "IB_CLIENT_ID"]
+# Backward compatibility aliases (so either naming works)

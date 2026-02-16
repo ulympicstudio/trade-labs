@@ -39,6 +39,9 @@ def should_halt_trading(
     realized_pnl_usd: float,
     unrealized_pnl_usd: float,
 ) -> Optional[str]:
+    """
+    Halt if current-day PnL breaches the daily max loss.
+    """
     daily_limit = calc_daily_max_loss_usd(equity_usd)
     total_pnl = realized_pnl_usd + unrealized_pnl_usd
     if total_pnl <= -daily_limit:
@@ -51,6 +54,9 @@ def approve_new_trade(
     open_risk_usd: float,
     proposed_trade_risk_usd: float,
 ) -> RiskStatus:
+    """
+    Portfolio-level gatekeeper.
+    """
     if state.trading_halted:
         return RiskStatus(False, f"Trading halted: {state.halted_reason}")
 

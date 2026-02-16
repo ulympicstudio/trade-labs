@@ -1,0 +1,38 @@
+[
+  {
+    "run_id": "test_run_001",
+    "symbol": "AAPL",
+    "side": "BUY",
+    "entry_price": 150.25,
+    "quantity": 100,
+    "stop_loss": 145.0,
+    "order_id": 123456,
+    "stop_order_id": 123457,
+    "order_success": true,
+    "entry_timestamp": "2026-02-15T03:58:34.855506",
+    "order_message": "Order placed",
+    "status": "CLOSED",
+    "exit_price": 152.5,
+    "exit_timestamp": "2026-02-15T03:58:34.855733",
+    "pnl": 225.0,
+    "pnl_percent": 1.4975
+  },
+  {
+    "run_id": "test_report",
+    "symbol": "TSLA",
+    "side": "BUY",
+    "entry_price": 250.0,
+    "quantity": 50,
+    "stop_loss": 245.0,
+    "order_id": 999,
+    "stop_order_id": null,
+    "order_success": true,
+    "entry_timestamp": "2026-02-15T03:59:03.382553",
+    "order_message": "Test",
+    "status": "CLOSED",
+    "exit_price": 255.0,
+    "exit_timestamp": "2026-02-15T03:59:03.382889",
+    "pnl": 250.0,
+    "pnl_percent": 2.0
+  }
+]

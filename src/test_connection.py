@@ -11,7 +11,7 @@ if ROOT not in sys.path:
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from config import IB_HOST, IB_PORT, IB_CLIENT_ID
+from config.ib_config import IB_HOST, IB_PORT, IB_CLIENT_ID
 from utils.logging import setup_logging
 
 

@@ -1,0 +1,32 @@
+[
+  {
+    "run_id": "test_run_001",
+    "timestamp": "2026-02-15T03:58:26.627528",
+    "backend": "SIM",
+    "armed": false,
+    "stats": {
+      "scanned": 5,
+      "executed": 3,
+      "successful": 3,
+      "failed": 0
+    },
+    "details": {
+      "test": true
+    }
+  },
+  {
+    "run_id": "test_run_001",
+    "timestamp": "2026-02-15T03:58:34.854977",
+    "backend": "SIM",
+    "armed": false,
+    "stats": {
+      "scanned": 5,
+      "executed": 3,
+      "successful": 3,
+      "failed": 0
+    },
+    "details": {
+      "test": true
+    }
+  }
+]

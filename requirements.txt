@@ -1,7 +1,19 @@
 
-ib-insync==0.9.86
+# Core Trading System
+ib-insync>=0.9.86
 pandas>=2.2
 numpy>=2.0
+
+# News & Sentiment Analysis
+feedparser>=6.0.12
+beautifulsoup4>=4.14.3
+requests>=2.31.0
+
+# Optional but Recommended
 pytz
 python-dotenv
 loguru
+
+# Note: For earnings calendar features, get a free Finnhub API key at:
+# https://finnhub.io/register
+# Set with: export FINNHUB_API_KEY='your_key'
