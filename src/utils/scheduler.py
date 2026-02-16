@@ -53,7 +53,7 @@ class PipelineScheduler:
         """
         job = self.scheduler.add_job(
             pipeline_fn,
-            trigger=CronTrigger(hour=9, minute=30, day_of_week='mon-fri', tz=self.tz),
+            trigger=CronTrigger(hour=9, minute=30, day_of_week='mon-fri', timezone=self.tz),
             kwargs={"num_candidates": num_candidates},
             id=name,
             name=f"Pipeline: {name}",
@@ -79,7 +79,7 @@ class PipelineScheduler:
         """
         job = self.scheduler.add_job(
             pipeline_fn,
-            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', tz=self.tz),
+            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', timezone=self.tz),
             kwargs={"num_candidates": num_candidates},
             id=name,
             name=f"Pipeline: {name}",
@@ -87,7 +87,8 @@ class PipelineScheduler:
         )
         
         self.jobs[name] = job
-        print(f"✓ Scheduled: Mid-day scan ({hour}:{minute:02d} AM ET, Mon-Fri)")
+        am_pm = "AM" if hour < 12 else "PM"
+        print(f"✓ Scheduled: Mid-day scan ({hour}:{minute:02d} {am_pm} ET, Mon-Fri)")
         return job
     
     def schedule_market_close_reconciliation(
@@ -100,7 +101,7 @@ class PipelineScheduler:
         """
         job = self.scheduler.add_job(
             reconciliation_fn,
-            trigger=CronTrigger(hour=16, minute=0, day_of_week='mon-fri', tz=self.tz),
+            trigger=CronTrigger(hour=16, minute=0, day_of_week='mon-fri', timezone=self.tz),
             id=name,
             name=f"Reconciliation: {name}",
             replace_existing=True,
@@ -124,7 +125,7 @@ class PipelineScheduler:
         """
         job = self.scheduler.add_job(
             report_fn,
-            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', tz=self.tz),
+            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', timezone=self.tz),
             id=name,
             name=f"Report: {name}",
             replace_existing=True,
@@ -149,7 +150,7 @@ class PipelineScheduler:
         """
         job = self.scheduler.add_job(
             fn,
-            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', tz=self.tz),
+            trigger=CronTrigger(hour=hour, minute=minute, day_of_week='mon-fri', timezone=self.tz),
             kwargs=kwargs or {},
             id=name,
             name=name,
