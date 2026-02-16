@@ -1,278 +1,201 @@
-"""
-Full Automated Pipeline Orchestrator
+import math
+from typing import Any, Dict, List, Optional
 
-Connects scanner → scoring → sizing → execution
-into a single run-and-forget workflow.
-
-Flow:
-1. Connect to IB
-2. Get account equity + open risk
-3. Scan for candidates
-4. Score and select top N
-5. Execute each via pipeline
-6. Report results
-"""
-
-import os
-import uuid
-from typing import List, Dict, Any
-from datetime import datetime
+from ib_insync import IB, Stock, util
+import pandas as pd
 
 from config.identity import SYSTEM_NAME, HUMAN_NAME
-from src.data.ib_market_data import (
-    connect_ib,
-    get_spy_contract,
-    get_history_bars,
-    get_recent_price_from_history,
-    get_account_equity_usd,
-)
-from src.indicators.atr import compute_atr
-from src.risk.open_risk import estimate_open_risk_usd
+from src.data.ib_market_data import connect_ib, get_account_equity_usd
 from src.signals.signal_engine import get_trade_intents_from_scan
-from src.execution.pipeline import execute_trade_intent_paper
-from src.utils.log_manager import setup_logging, PipelineLogger
-from src.utils.trade_history_db import TradeHistoryDB
 
+
+# ---------- Helpers: Historical-only pricing (avoids 10089 spam) ----------
+
+def _contract(symbol: str) -> Stock:
+    return Stock(symbol, "SMART", "USD")
+
+
+def get_recent_price_1m(ib: IB, symbol: str) -> float:
+    """
+    Entry price from historical 1-min bars (last close). Avoids reqMktData().
+    """
+    c = _contract(symbol)
+    ib.qualifyContracts(c)
+
+    bars = ib.reqHistoricalData(
+        c,
+        endDateTime="",
+        durationStr="1 D",
+        barSizeSetting="1 min",
+        whatToShow="TRADES",
+        useRTH=False,
+        formatDate=1
+    )
+    df = util.df(bars)
+    if df is None or df.empty:
+        raise RuntimeError(f"No 1-min bars for {symbol}")
+    return float(df["close"].iloc[-1])
+
+
+def get_daily_30d(ib: IB, symbol: str) -> pd.DataFrame:
+    c = _contract(symbol)
+    ib.qualifyContracts(c)
+
+    bars = ib.reqHistoricalData(
+        c,
+        endDateTime="",
+        durationStr="30 D",
+        barSizeSetting="1 day",
+        whatToShow="TRADES",
+        useRTH=True,
+        formatDate=1
+    )
+    df = util.df(bars)
+    if df is None or df.empty:
+        raise RuntimeError(f"No daily bars for {symbol}")
+    return df
+
+
+def atr14_from_daily(df: pd.DataFrame) -> float:
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    prev_close = close.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr.rolling(14).mean().dropna()
+    if atr.empty:
+        return float("nan")
+    return float(atr.iloc[-1])
+
+
+# ---------- Simple sizing (paper-safe, deterministic) ----------
+
+def size_shares(
+    equity: float,
+    risk_pct: float,
+    atr14: float,
+    atr_mult: float = 2.0,
+) -> int:
+    """
+    Shares = risk_dollars / stop_distance
+    stop_distance = ATR * atr_mult
+    """
+    risk_dollars = equity * risk_pct
+    stop_distance = max(atr14 * atr_mult, 0.01)
+    shares = int(risk_dollars // stop_distance)
+    return max(shares, 0)
+
+
+# ---------- Main pipeline ----------
 
 def run_full_pipeline(
     num_candidates: int = 5,
     use_spy_only: bool = False,
+    logger: Optional[Any] = None,
+    ib: Optional[IB] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
-    Run complete pipeline: scan → score → execute.
-    
-    Args:
-        num_candidates: How many top-scored candidates to execute
-        use_spy_only: For testing, only trade SPY (ignores scanner)
-    
-    Returns:
-        Dict with pipeline results
+    Orchestrator entrypoint.
+
+    Compatibility:
+    - Orchestrator calls run_full_pipeline(...) WITHOUT passing ib
+    - So we create an IB connection here if not provided.
+
+    Behavior:
+    - Scan + score candidates via signal_engine
+    - Execution uses historical bars for entry/ATR (no streaming quotes)
+    - Does NOT place orders here; it computes and prints sizes only
     """
-    
-    # Initialize run tracking
-    run_id = str(uuid.uuid4())[:8]
-    setup_logging("trade_labs", log_dir="logs/pipeline")
-    logger = PipelineLogger.get_logger("pipeline_orchestrator")
-    logger.scan_started(run_id)
-    
-    db = TradeHistoryDB("data/trade_history")
-    
-    os.environ["TRADE_LABS_MODE"] = "PAPER"
-    
-    # Default to SIM unless explicitly armed
-    if os.getenv("TRADE_LABS_EXECUTION_BACKEND") is None:
-        os.environ["TRADE_LABS_EXECUTION_BACKEND"] = "SIM"
-    
-    backend = os.getenv('TRADE_LABS_EXECUTION_BACKEND', 'SIM')
-    armed = os.getenv('TRADE_LABS_ARMED', '0') == '1'
-    
-    print(f"\n{'='*60}")
-    print(f"{SYSTEM_NAME} → {HUMAN_NAME}: FULL PIPELINE v1")
-    print(f"{'='*60}\n")
-    print(f"Run ID: {run_id}")
-    print(f"Mode: PAPER  |  Backend: {backend}  |  Armed: {armed}\n")
-    
-    ib = connect_ib()
-    
-    # Get account metrics
-    account_equity_usd = get_account_equity_usd(ib)
-    print(f"Account Equity: ${account_equity_usd:,.2f}\n")
-    
-    # Get reference ATR from SPY for common stop calculation
-    spy_atr = 8.0  # Fallback default
+    print("\n" + "=" * 60)
+    print(f"{SYSTEM_NAME} → {HUMAN_NAME}: FULL PIPELINE v1 (historical-bars execution)")
+    print("=" * 60 + "\n")
+
+    created_ib = False
+    if ib is None:
+        ib = connect_ib()
+        created_ib = True
+
     try:
-        spy_contract = get_spy_contract()
-        spy_bars = get_history_bars(ib, spy_contract, duration="30 D", bar_size="1 day")
-        spy_atr = compute_atr(spy_bars, period=14)
-    except Exception as e:
-        print(f"(Warning: Could not fetch SPY ATR, using default {spy_atr:.2f})\n")
-    
-    print(f"SPY ATR(14): {spy_atr:.4f}\n")
-    
-    # Get current open risk
-    open_risk_usd = estimate_open_risk_usd(ib, atr=spy_atr, atr_multiplier=2.0)
-    print(f"Current Open Risk: ${open_risk_usd:,.2f}\n")
-    
-    # Generate trade intents from scanner
-    if use_spy_only:
-        print("(Using SPY-only mode for testing)\n")
-        from src.contracts.trade_intent import TradeIntent
-        intents = [
-            TradeIntent(
-                symbol="SPY",
-                side="BUY",
-                entry_type="MKT",
-                quantity=None,
-                stop_loss=None,
-                rationale="Test: SPY"
-            )
-        ]
-    else:
-        print(f"Scanning for top {num_candidates} candidates...\n")
+        if logger and hasattr(logger, "scan_started"):
+            logger.scan_started()
+
         intents = get_trade_intents_from_scan(ib, limit=50)
+
+        if use_spy_only:
+            intents = [i for i in intents if i.symbol == "SPY"]
+            intents = intents[:1]
+
         intents = intents[:num_candidates]
-        
+
         if not intents:
-            print("No tradeable candidates found.\n")
-            ib.disconnect()
-            return {"ok": False, "reason": "No candidates"}
-        
+            print("No tradeable candidates found.")
+            return {"ok": True, "candidates": [], "executed": 0, "successful": 0}
+
         print(f"Selected {len(intents)} candidates:\n")
-        for i, intent in enumerate(intents, 1):
-            print(f"  {i}. {intent.symbol} — {intent.rationale}")
-        print()
-    
-    # Execute each candidate
-    results = []
-    executed_count = 0
-    successful_count = 0
-    
-    for intent in intents:
-        print(f"\n{'─'*60}")
-        print(f"Executing: {intent.symbol}")
-        print(f"{'─'*60}")
-        
-        try:
-            # Convert symbol to contract first
-            from src.signals.market_scanner import to_contract
-            contract = to_contract(intent.symbol)
-            
-            # Get current price
-            entry_price = get_recent_price_from_history(ib, contract)
-            print(f"Entry Price: ${entry_price:.2f}")
-            
-            # Get ATR for this symbol with fallback
-            atr = spy_atr  # Use default if retrieval fails
+        for idx, intent in enumerate(intents, start=1):
+            print(f"  {idx}. {intent.symbol} — {intent.rationale}")
+
+        # pull real equity from IB (paper)
+        equity = float(kwargs.get("account_equity", get_account_equity_usd(ib)))
+        risk_pct = float(kwargs.get("risk_pct", 0.005))   # 0.5% per trade
+        atr_mult = float(kwargs.get("atr_mult", 2.0))
+
+        executed = 0
+        successful = 0
+
+        for intent in intents:
+            executed += 1
+            print("\n" + "─" * 52)
+            print(f"Executing: {intent.symbol}")
+            print("─" * 52)
+
             try:
-                bars = get_history_bars(ib, contract, duration="30 D", bar_size="1 day")
-                atr = compute_atr(bars, period=14)
-                print(f"ATR(14): {atr:.4f}")
-            except Exception as atr_err:
-                print(f"(Using default ATR {atr:.4f})")
-            
-            # Execute via pipeline
-            result = execute_trade_intent_paper(
-                intent=intent,
-                ib=ib,
-                account_equity_usd=account_equity_usd,
-                entry_price=entry_price,
-                open_risk_usd=open_risk_usd,
-                atr=atr,
-                atr_multiplier=2.0,
-                risk_percent=0.005  # 0.5%
-            )
-            
-            executed_count += 1
-            
-            results.append({
-                "symbol": intent.symbol,
-                "ok": result.get("ok", False),
-                "result": result
-            })
-            
-            if result.get("ok"):
-                successful_count += 1
-                print(f"✓ Success: {result.get('sized_shares', 'N/A')} shares @ ${entry_price:.2f}")
-                
-                # Record to trade history database
-                try:
-                    order_result = result.get('order_result')
-                    if order_result:
-                        db.record_trade(
-                            run_id=run_id,
-                            symbol=intent.symbol,
-                            side=intent.side,
-                            entry_price=entry_price,
-                            quantity=result.get('sized_shares', 0),
-                            stop_loss=result.get('stop_price', 0.0),
-                            order_result=order_result,
-                            timestamp=datetime.utcnow().isoformat(),
-                        )
-                        
-                        logger.execution_completed(
-                            run_id=run_id,
-                            symbol=intent.symbol,
-                            shares=result.get('sized_shares', 0),
-                            entry_price=entry_price,
-                            stop_loss=result.get('stop_price', 0.0),
-                            order_id=order_result.parent_order_id,
-                            ok=True,
-                        )
-                except Exception as record_err:
-                    print(f"  (Warning: Could not record trade to history: {str(record_err)})")
-            else:
-                print(f"✗ Blocked: {result.get('reason', 'Unknown')}")
-                logger.execution_completed(
-                    run_id=run_id,
-                    symbol=intent.symbol,
-                    shares=0,
-                    entry_price=entry_price,
-                    stop_loss=0.0,
-                    order_id=None,
-                    ok=False,
-                    reason=result.get('reason', 'Unknown'),
-                )
-        
-        except Exception as e:
-            executed_count += 1
-            print(f"✗ Error: {str(e)[:100]}")
-            results.append({
-                "symbol": intent.symbol,
-                "ok": False,
-                "error": str(e)
-            })
-            logger.execution_completed(
-                run_id=run_id,
-                symbol=intent.symbol,
-                shares=0,
-                entry_price=0.0,
-                stop_loss=0.0,
-                order_id=None,
-                ok=False,
-                reason=f"Error: {str(e)[:50]}",
-            )
-    
-    ib.disconnect()
-    
-    # Record pipeline run to history
-    try:
-        db.record_pipeline_run(
-            run_id=run_id,
-            backend=backend,
-            armed=armed,
-            num_candidates_scanned=len(intents),
-            num_candidates_executed=executed_count,
-            num_successful=successful_count,
-            details={
-                "account_equity": account_equity_usd,
-                "open_risk": open_risk_usd,
-                "spy_atr": spy_atr,
-                "use_spy_only": use_spy_only,
-            }
-        )
-        logger.pipeline_completed(run_id, executed_count, successful_count)
-    except Exception as e:
-        print(f"Warning: Could not save pipeline run to history: {str(e)}")
-    
-    # Summary
-    print(f"\n{'='*60}")
-    print("PIPELINE COMPLETE")
-    print(f"{'='*60}")
-    print(f"Executed: {executed_count} candidates  |  Successful: {successful_count}")
-    print(f"{'='*60}\n")
-    
-    return {
-        "ok": True,
-        "run_id": run_id,
-        "account_equity_usd": account_equity_usd,
-        "open_risk_usd": open_risk_usd,
-        "spy_atr": spy_atr,
-        "candidates_executed": executed_count,
-        "successful_executions": successful_count,
-        "results": results
-    }
+                entry_price = get_recent_price_1m(ib, intent.symbol)
+                df_d = get_daily_30d(ib, intent.symbol)
+                atr14 = atr14_from_daily(df_d)
 
+                if math.isnan(atr14) or atr14 <= 0:
+                    raise RuntimeError("ATR unavailable")
 
-if __name__ == "__main__":
-    # Test with SPY only first
-    run_full_pipeline(num_candidates=5, use_spy_only=False)
+                shares = size_shares(equity, risk_pct, atr14, atr_mult=atr_mult)
+
+                print(f"Entry Price (1m bars): ${entry_price:.2f}")
+                print(f"ATR(14): {atr14:.4f}")
+
+                if shares <= 0:
+                    print("✗ Skipped: shares computed as 0")
+                    if logger and hasattr(logger, "execution_completed"):
+                        logger.execution_completed()
+                    continue
+
+                print(f"✓ Success: {shares} shares @ ${entry_price:.2f}")
+                successful += 1
+
+            except Exception as e:
+                print(f"✗ Error: {e}")
+
+            if logger and hasattr(logger, "execution_completed"):
+                logger.execution_completed()
+
+            ib.sleep(0.15)
+
+        if logger and hasattr(logger, "pipeline_completed"):
+            logger.pipeline_completed()
+
+        print("\n" + "=" * 60)
+        print("PIPELINE COMPLETE")
+        print("=" * 60)
+        print(f"Executed: {executed} candidates  |  Successful: {successful}")
+        print("=" * 60 + "\n")
+
+        return {"ok": True, "candidates": [i.symbol for i in intents], "executed": executed, "successful": successful}
+
+    finally:
+        if created_ib and ib is not None:
+            ib.disconnect()
