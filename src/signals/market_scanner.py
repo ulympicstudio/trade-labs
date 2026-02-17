@@ -113,9 +113,21 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
             filtered_count += 1
             continue
 
-        # Check if looks like ETF (unless in allowlist)
-        if symbol not in STOCK_ALLOWLIST and _looks_like_etf(details.longName):
-            log.debug("Scanner: %s rejected (longName='%s' looks like ETF)", symbol, details.longName)
+        # Fetch full contract details to get accurate longName
+        try:
+            full_details = ib.reqContractDetails(c)
+            if full_details and len(full_details) > 0:
+                long_name = (full_details[0].longName or "").upper()
+                log.debug("Scanner: %s longName='%s'", symbol, long_name)
+                
+                # Check if looks like ETF (unless in allowlist)
+                if symbol not in STOCK_ALLOWLIST and _looks_like_etf(long_name):
+                    log.debug("Scanner: %s rejected (longName contains ETF keyword)", symbol)
+                    filtered_count += 1
+                    continue
+        except Exception as e:
+            log.warning("Scanner: %s could not fetch full details: %s", symbol, e)
+            # If we can't fetch details, skip it to be safe
             filtered_count += 1
             continue
 
