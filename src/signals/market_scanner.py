@@ -21,11 +21,28 @@ _SCANNER_BACKOFF_BASE = 2.0  # seconds; retries wait 2, 4, 8 …
 
 
 def _looks_like_etf(long_name: str) -> bool:
+    """
+    Check if a security is an ETF/ETN/FUND by examining longName.
+    Be conservative: only reject if it's CLEARLY a product, not a regular stock.
+    """
     if not long_name:
         return False
     name = long_name.upper()
-    # Check for ETF-like keywords using shared config
-    return any(tag in name for tag in ETF_KEYWORDS)
+    
+    # High-confidence ETF/product keywords
+    if " ETF" in name or " ETN" in name:
+        return True
+    
+    # Crypto/blockchain-specific products (these are nearly always problematic)
+    if "BITCOIN" in name or "ETHEREUM" in name or "CRYPTO" in name or "BLOCKCHAIN" in name:
+        if "TRUST" in name or "FUND" in name or "NOTE" in name:
+            return True
+    
+    # Leveraged/inverse products
+    if ("2X" in name or "3X" in name or "INVERSE" in name or "BEAR" in name) and ("FUND" in name or "ETF" in name or "TRUST" in name):
+        return True
+    
+    return False
 
 
 def _req_scanner_with_retry(ib: IB, sub: ScannerSubscription) -> list:
@@ -109,7 +126,7 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
 
         # Check blocklist first
         if symbol in STOCK_BLOCKLIST:
-            log.debug("Scanner: %s rejected (in STOCK_BLOCKLIST)", symbol)
+            print(f"[SCAN] {symbol} rejected: in STOCK_BLOCKLIST")
             filtered_count += 1
             continue
 
@@ -118,24 +135,23 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
             full_details = ib.reqContractDetails(c)
             if full_details and len(full_details) > 0:
                 long_name = (full_details[0].longName or "").upper()
-                log.debug("Scanner: %s longName='%s'", symbol, long_name)
+                print(f"[SCAN] {symbol:6} longName='{long_name}'")
                 
                 # Check if looks like ETF (unless in allowlist)
                 if symbol not in STOCK_ALLOWLIST and _looks_like_etf(long_name):
-                    log.debug("Scanner: %s rejected (longName contains ETF keyword)", symbol)
+                    print(f"       → REJECTED (ETF keywords found)")
                     filtered_count += 1
                     continue
+                else:
+                    print(f"       → ACCEPTED")
         except Exception as e:
-            log.warning("Scanner: %s could not fetch full details: %s", symbol, e)
-            # If we can't fetch details, skip it to be safe
+            print(f"[SCAN] {symbol} could not fetch details: {e}")
             filtered_count += 1
             continue
 
         out.append(ScanResult(symbol=symbol, rank=int(r.rank)))
     
-    if filtered_count > 0:
-        log.info("Scanner: %d results filtered out (kept %d)", filtered_count, len(out))
-    
+    print(f"[SCAN] Summary: filtered {filtered_count}, kept {len(out)} stocks")
     return out
 
 
