@@ -7,6 +7,7 @@ from ib_insync import IB, Stock, util
 from config.identity import SYSTEM_NAME, HUMAN_NAME
 from config.runtime import is_armed, execution_backend, is_paper
 from config.ib_config import IB_HOST, IB_PORT, IB_CLIENT_ID
+from config.universe_filter import ALLOWED_SEC_TYPES, ALLOWED_EXCHANGES, STOCK_ALLOWLIST, STOCK_BLOCKLIST, ETF_KEYWORDS
 
 from src.execution.bracket_orders import BracketParams, place_limit_tp_trail_bracket
 from src.signals.market_scanner import scan_us_most_active_stocks
@@ -43,12 +44,6 @@ ATR_CACHE_SECONDS = 600  # 10 minutes
 MAX_NEW_BRACKETS_PER_LOOP = 1           # Submit max 1 bracket per 10s loop
 COOLDOWN_SECONDS_PER_SYMBOL = 300       # Don't retry same symbol for 5 min
 
-# ---- Universe Filter (Stocks Only) ----
-ALLOWED_SEC_TYPES = {"STK"}
-ALLOWED_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
-STOCK_ALLOWLIST = {"SPY", "QQQ"}                              # Always allow these
-STOCK_BLOCKLIST = {"UNG", "SLV", "KOLD", "BITO"}             # Always block (commodity/leveraged ETFs)
-ETF_KEYWORDS = {"ETF", "ETN", "FUND", "TRUST", "INDEX", "NOTE"}  # Reject if in longName
 
 def connect_ib() -> IB:
     ib = IB()

@@ -4,6 +4,8 @@ from typing import List, Optional, Tuple
 
 from ib_insync import IB, ScannerSubscription, Stock
 
+from config.universe_filter import STOCK_ALLOWLIST, STOCK_BLOCKLIST, ETF_KEYWORDS
+
 log = logging.getLogger(__name__)
 
 
@@ -12,15 +14,6 @@ class ScanResult:
     symbol: str
     rank: int
 
-
-LEVERAGED_OR_INVERSE_BLOCKLIST = {
-    "TQQQ", "SQQQ", "SOXL", "SOXS", "TNA", "TZA",
-    "SPXL", "SPXS", "UVXY", "SVXY", "ZSL", "UGL",
-    "TSLL", "TSLS", "UVIX", "DUST",
-}
-
-ETF_ALLOWLIST = {"SPY", "QQQ"}
-ETF_BLOCKLIST = {"BITO"}
 
 # ---- Scanner retry config ----
 _SCANNER_MAX_RETRIES = 3
@@ -31,9 +24,8 @@ def _looks_like_etf(long_name: str) -> bool:
     if not long_name:
         return False
     name = long_name.upper()
-    # Check for ETF-like keywords (no leading space needed)
-    etf_keywords = ("ETF", "ETN", "TRUST", "FUND", "INDEX", "NOTES", "SECURITIES")
-    return any(tag in name for tag in etf_keywords)
+    # Check for ETF-like keywords using shared config
+    return any(tag in name for tag in ETF_KEYWORDS)
 
 
 def _req_scanner_with_retry(ib: IB, sub: ScannerSubscription) -> list:
@@ -116,13 +108,13 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
             continue
 
         # Check blocklist first
-        if symbol in ETF_BLOCKLIST:
-            log.debug("Scanner: %s rejected (in ETF_BLOCKLIST)", symbol)
+        if symbol in STOCK_BLOCKLIST:
+            log.debug("Scanner: %s rejected (in STOCK_BLOCKLIST)", symbol)
             filtered_count += 1
             continue
 
         # Check if looks like ETF (unless in allowlist)
-        if symbol not in ETF_ALLOWLIST and _looks_like_etf(details.longName):
+        if symbol not in STOCK_ALLOWLIST and _looks_like_etf(details.longName):
             log.debug("Scanner: %s rejected (longName='%s' looks like ETF)", symbol, details.longName)
             filtered_count += 1
             continue
