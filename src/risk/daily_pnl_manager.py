@@ -13,7 +13,7 @@ Prevents death spirals on bad days.
 
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
@@ -42,9 +42,9 @@ def record_session_start_equity(equity: float):
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     
     data = {
-        "session_date": datetime.utcnow().date().isoformat(),
+        "session_date": datetime.now(timezone.utc).date().isoformat(),
         "start_equity": equity,
-        "start_time": datetime.utcnow().isoformat(),
+        "start_time": datetime.now(timezone.utc).isoformat(),
     }
     
     with open(SESSION_FILE, "w") as f:
@@ -203,7 +203,7 @@ def get_kill_switch_status(ib: IB) -> Dict[str, Any]:
     is_active = is_kill_switch_active(ib)
     
     return {
-        "session_date": datetime.utcnow().date().isoformat(),
+        "session_date": datetime.now(timezone.utc).date().isoformat(),
         "start_equity": start_equity,
         "realized_pnl": realized,
         "unrealized_pnl": unrealized,

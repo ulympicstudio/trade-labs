@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Set, List, Dict
 
 from ib_insync import IB, Stock, util
@@ -159,7 +159,7 @@ def main():
             equity = get_equity(ib)
             
             # Record session start on first run or new trading day
-            current_session_date = datetime.utcnow().date()
+            current_session_date = datetime.now(timezone.utc).date()
             if not session_started or last_session_date != current_session_date:
                 record_session_start_equity(equity)
                 session_started = True
