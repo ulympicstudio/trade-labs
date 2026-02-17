@@ -28,7 +28,7 @@ LOOP_SECONDS = 10
 SCAN_REFRESH_SECONDS = 300
 SCAN_LIMIT = 30
 SCORE_TOP_N_FROM_SCAN = 20
-TRADE_TOP_N = 6
+TRADE_TOP_N = 12  # Top N scored candidates to evaluate (was 6, show more variety)
 
 ENTRY_OFFSET_PCT = 0.0005
 TAKE_PROFIT_R = 1.5

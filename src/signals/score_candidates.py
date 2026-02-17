@@ -29,7 +29,7 @@ ETF_BLOCKLIST = {"BITO"}
 # ---- HARD FILTERS (tune anytime) ----
 MIN_PRICE = 5.0
 MIN_ATR14 = 0.25
-MIN_AVG_DOLLAR_VOL_20D = 25_000_000  # $25M/day average dollar volume
+MIN_AVG_DOLLAR_VOL_20D = 10_000_000  # $10M/day average dollar volume (was $25M, too restrictive)
 
 
 def _contract(symbol: str) -> Stock:
@@ -134,9 +134,11 @@ def score_scan_results(
             continue
 
         if sym in LEVERAGED_OR_INVERSE_BLOCKLIST:
+            print(f"  [SCORE] {sym} rejected: in LEVERAGED_OR_INVERSE_BLOCKLIST")
             continue
 
         if sym in ETF_BLOCKLIST and sym not in ETF_ALLOWLIST:
+            print(f"  [SCORE] {sym} rejected: in ETF_BLOCKLIST")
             continue
 
         try:
@@ -148,16 +150,20 @@ def score_scan_results(
 
             # HARD filters
             if math.isnan(px) or px < MIN_PRICE:
+                print(f"  [SCORE] {sym} rejected: price ${px:.2f} < ${MIN_PRICE}")
                 continue
             if math.isnan(adv20) or adv20 < MIN_AVG_DOLLAR_VOL_20D:
+                print(f"  [SCORE] {sym} rejected: ADV20=${adv20/1e6:.1f}M < ${MIN_AVG_DOLLAR_VOL_20D/1e6:.0f}M")
                 continue
             if math.isnan(atr14) or atr14 < MIN_ATR14:
+                print(f"  [SCORE] {sym} rejected: ATR14={atr14:.2f} < {MIN_ATR14}")
                 continue
 
             # Momentum (60 minutes)
             df_1m = _get_intraday_1m(ib, sym)
             mom = _momentum_pct_60m(df_1m)
             if math.isnan(mom):
+                print(f"  [SCORE] {sym} rejected: no 60m momentum")
                 continue
 
             # Score: momentum dominates; ATR gives swing preference
@@ -167,6 +173,8 @@ def score_scan_results(
                 f"Momentum60m={mom:.2f}% | ATR14={atr14:.2f} | "
                 f"LastClose=${px:.2f} | ADV20=${adv20/1e6:.1f}M | score={score:.2f}"
             )
+            
+            print(f"  [SCORE] {sym} ACCEPTED: {reason}")
 
             scored.append(ScoredCandidate(
                 symbol=sym,
