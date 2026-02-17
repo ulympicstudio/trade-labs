@@ -1,6 +1,6 @@
 import time
 from datetime import datetime, timezone
-from typing import Set, List, Dict
+from typing import Set, List, Dict, Tuple
 
 from ib_insync import IB, Stock, util
 
@@ -39,7 +39,16 @@ PRINT_HEARTBEAT_SECONDS = 60
 
 # Cache ATR so we don’t request daily bars repeatedly
 ATR_CACHE_SECONDS = 600  # 10 minutes
+# ---- Bracket Throttling & Safety ----
+MAX_NEW_BRACKETS_PER_LOOP = 1           # Submit max 1 bracket per 10s loop
+COOLDOWN_SECONDS_PER_SYMBOL = 300       # Don't retry same symbol for 5 min
 
+# ---- Universe Filter (Stocks Only) ----
+ALLOWED_SEC_TYPES = {"STK"}
+ALLOWED_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
+STOCK_ALLOWLIST = {"SPY", "QQQ"}                              # Always allow these
+STOCK_BLOCKLIST = {"UNG", "SLV", "KOLD", "BITO"}             # Always block (commodity/leveraged ETFs)
+ETF_KEYWORDS = {"ETF", "ETN", "FUND", "TRUST", "INDEX", "NOTE"}  # Reject if in longName
 
 def connect_ib() -> IB:
     ib = IB()
@@ -53,6 +62,46 @@ def connect_ib() -> IB:
     ib.wrapper.error = quiet_error
 
     return ib
+
+
+def is_valid_stock_contract(ib: IB, symbol: str) -> Tuple[bool, str]:
+    """
+    Validate that symbol is a tradeable stock (not ETF/ETN/etc).
+    
+    Returns:
+        (is_valid, reason_if_invalid)
+    """
+    # Blocklist takes precedence
+    if symbol in STOCK_BLOCKLIST:
+        return False, f"In blocklist"
+    
+    # Allowlist always passes
+    if symbol in STOCK_ALLOWLIST:
+        return True, ""
+    
+    # Qualify and check secType
+    try:
+        c = _contract(symbol)
+        ib.qualifyContracts(c)
+        
+        # Check secType
+        if c.secType not in ALLOWED_SEC_TYPES:
+            return False, f"secType={c.secType} not in {ALLOWED_SEC_TYPES}"
+        
+        # Check primaryExchange
+        if c.primaryExchange and c.primaryExchange not in ALLOWED_EXCHANGES:
+            return False, f"exchange={c.primaryExchange} not allowed"
+        
+        # Check longName for ETF keywords
+        if hasattr(c, 'contractDetails'):
+            long_name = (c.contractDetails.longName or "").upper()
+            for kw in ETF_KEYWORDS:
+                if kw in long_name:
+                    return False, f"longName contains '{kw}'"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Qualification failed: {e}"
 
 
 def _contract(symbol: str) -> Stock:
@@ -149,6 +198,9 @@ def main():
 
     atr_cache: Dict[str, float] = {}
     atr_cache_ts: Dict[str, float] = {}
+    
+    # Track last bracket submission per symbol (for throttling)
+    last_bracket_ts: Dict[str, float] = {}  # symbol -> timestamp of last bracket
 
     try:
         while True:
@@ -207,41 +259,89 @@ def main():
             if should_print:
                 print(f"\n--- Loop --- ARMED={armed} equity={equity:,.0f} open_risk={open_risk_pct:.3f} active={len(active)}")
 
+                brackets_submitted_this_loop = 0  # Throttle: max 1 per loop
+                
                 for cand in scored:
                     sym = cand.symbol
+                    
+                    # Skip if already active
                     if sym in active:
                         continue
+                    
+                    # Skip if max positions reached
                     if len(active) >= MAX_CONCURRENT_POSITIONS:
                         print("Max concurrent positions reached.")
                         break
-
-                    px = get_recent_price_1m(ib, sym)
+                    
+                    # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
+                    is_valid, reason = is_valid_stock_contract(ib, sym)
+                    if not is_valid:
+                        print(f"[REJECT] {sym}: not tradeable ({reason})")
+                        continue
+                    
+                    # ====== GET PRICE & CHECK MIN ======
+                    try:
+                        px = get_recent_price_1m(ib, sym)
+                    except Exception as e:
+                        print(f"[SKIP] {sym}: price fetch failed ({e})")
+                        continue
+                    
                     if px < MIN_PRICE:
                         continue
 
+                    # ====== GET ATR & CHECK VALIDITY ======
                     atr = float(getattr(cand, "atr14", atr_cache.get(sym, 0.0)))
                     if atr <= 0:
                         continue
 
+                    # ====== CALCULATE SIZING ======
                     stop_dist = atr * INITIAL_RISK_ATR_MULT
                     risk_dollars = equity * RISK_PER_TRADE
                     qty = int(risk_dollars // stop_dist)
                     if qty <= 0:
                         continue
 
+                    # ====== FIX A: PRE-FLIGHT VALIDATION GATE ======
                     entry = px * (1 - ENTRY_OFFSET_PCT)
                     tp = entry + (TAKE_PROFIT_R * stop_dist)
                     trail_amt = atr * TRAIL_ATR_MULT
+                    
+                    # Triple-check before submission
+                    if entry is None or entry <= 0:
+                        print(f"[VALIDATION] {sym}: entry price invalid (${entry})")
+                        continue
+                    
+                    if atr <= 0:
+                        print(f"[VALIDATION] {sym}: ATR invalid ({atr})")
+                        continue
+                    
+                    if qty <= 0:
+                        print(f"[VALIDATION] {sym}: qty invalid ({qty})")
+                        continue
 
-                    # Check daily kill switch before placing any trade
+                    # ====== CHECK DAILY KILL SWITCH ======
                     if is_kill_switch_active(ib):
                         print(f"[KILL_SWITCH] Rejecting {sym}: daily loss threshold exceeded")
                         continue
-
+                    
+                    # ====== CHECK THROTTLE: COOLDOWN PER SYMBOL ======
+                    last_bracket_time = last_bracket_ts.get(sym, 0.0)
+                    if now - last_bracket_time < COOLDOWN_SECONDS_PER_SYMBOL:
+                        cooldown_remain = COOLDOWN_SECONDS_PER_SYMBOL - (now - last_bracket_time)
+                        print(f"[THROTTLE] {sym}: cooldown active ({cooldown_remain:.0f}s remaining)")
+                        continue
+                    
+                    # ====== CHECK THROTTLE: MAX 1 PER LOOP ======
+                    if brackets_submitted_this_loop >= MAX_NEW_BRACKETS_PER_LOOP:
+                        print(f"[THROTTLE] {sym}: max {MAX_NEW_BRACKETS_PER_LOOP} bracket(s) per loop reached")
+                        break
+                    
+                    # ====== SIM MODE ======
                     if not armed:
                         print(f"[SIM] {sym} qty={qty} entry={entry:.2f} tp={tp:.2f} trail={trail_amt:.2f}")
                         continue
 
+                    # ====== SUBMIT BRACKET (ARMED MODE) ======
                     params = BracketParams(
                         symbol=sym, qty=qty,
                         entry_limit=entry, take_profit=tp, trail_amount=trail_amt,
@@ -249,7 +349,11 @@ def main():
                     )
                     res = place_limit_tp_trail_bracket(ib, params)
                     print(f"[IB] {sym} -> {res.ok} {res.message}")
-                    active.add(sym)
+                    
+                    if res.ok:
+                        active.add(sym)
+                        last_bracket_ts[sym] = now
+                        brackets_submitted_this_loop += 1
 
                 last_symbols = current_symbols
                 last_print_ts = now
