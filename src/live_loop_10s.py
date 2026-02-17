@@ -364,6 +364,14 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping live loop.")
     finally:
+        # Cancel pending async tasks before disconnect
+        import asyncio
+        try:
+            pending = asyncio.all_tasks()
+            for task in pending:
+                task.cancel()
+        except:
+            pass
         ib.disconnect()
         print("Disconnected.")
 
