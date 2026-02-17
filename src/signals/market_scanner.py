@@ -22,8 +22,8 @@ _SCANNER_BACKOFF_BASE = 2.0  # seconds; retries wait 2, 4, 8 …
 
 def _looks_like_etf(long_name: str) -> bool:
     """
-    Check if a security is an ETF/ETN/FUND by examining longName.
-    Be conservative: only reject if it's CLEARLY a product, not a regular stock.
+    Check if a security is an ETF/ETN/FUND/leveraged product by examining longName.
+    Be conservative: only reject if it's CLEARLY not a tradeable common stock.
     """
     if not long_name:
         return False
@@ -33,14 +33,18 @@ def _looks_like_etf(long_name: str) -> bool:
     if " ETF" in name or " ETN" in name:
         return True
     
+    # Leveraged products (ProShares ULTRA, ULTRAPRO, etc.)
+    if "ULTRA" in name or "PROSHARES" in name or "DIREXION" in name:
+        return True
+    
+    # Explicit leverage multipliers (2X, 3X, etc.)
+    if "2X" in name or "3X" in name or "BULL" in name or "BEAR" in name or "SHORT" in name:
+        return True
+    
     # Crypto/blockchain-specific products (these are nearly always problematic)
     if "BITCOIN" in name or "ETHEREUM" in name or "CRYPTO" in name or "BLOCKCHAIN" in name:
         if "TRUST" in name or "FUND" in name or "NOTE" in name:
             return True
-    
-    # Leveraged/inverse products
-    if ("2X" in name or "3X" in name or "INVERSE" in name or "BEAR" in name) and ("FUND" in name or "ETF" in name or "TRUST" in name):
-        return True
     
     return False
 
