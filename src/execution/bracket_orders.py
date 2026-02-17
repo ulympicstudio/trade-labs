@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from ib_insync import IB, Stock, LimitOrder, Order, TrailingStopOrder
+from ib_insync import IB, Stock, LimitOrder, Order
 
 
 @dataclass
@@ -71,13 +71,12 @@ def place_limit_tp_trail_bracket(
         print(f"  [DEBUG] TP SELL order: id={tp_id}, qty={p.qty}, LMT={p.take_profit:.2f}, parentId={parent_id}")
 
         # Child B: Trailing stop
-        # Use TrailingStopOrder for cleaner handling
-        trail = TrailingStopOrder(
-            action="SELL",
-            totalQuantity=p.qty,
-            trailingPercent=0,  # Use trailing amount in dollars (auxPrice)
-            auxPrice=float(round(p.trail_amount, 4))  # trailing amount in $
-        )
+        # Use Order with orderType='TRAIL' for proper trailing stop
+        trail = Order()
+        trail.action = "SELL"
+        trail.totalQuantity = p.qty
+        trail.orderType = "TRAIL"
+        trail.auxPrice = float(round(p.trail_amount, 4))  # trailing amount in $
         trail.parentId = parent_id
         trail.tif = p.tif
         trail.ocaGroup = oca_group
