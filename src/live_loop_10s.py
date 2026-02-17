@@ -1,4 +1,5 @@
 import time
+import os
 from datetime import datetime, timezone
 from typing import Set, List, Dict, Tuple
 
@@ -16,13 +17,23 @@ from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
 )
 
+# ====== CATALYST-DRIVEN TRADING ENGINE ======
+try:
+    from src.data.catalyst_hunter import CatalystHunter
+    from src.data.catalyst_scorer import CatalystScorer
+    from src.data.research_engine import ResearchEngine
+    CATALYST_ENGINE_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Catalyst engine not available: {e}")
+    CATALYST_ENGINE_AVAILABLE = False
+
 
 # ---- Risk Framework ----
 RISK_PER_TRADE = 0.005
 MAX_TOTAL_OPEN_RISK = 0.025
 MAX_CONCURRENT_POSITIONS = 6
-DAILY_KILL_SWITCH = 0.015  # placeholder (we’ll wire true PnL next)
-
+DAILY_KILL_SWITCH = 0.015  # placeholder (we'll wire true PnL next)
+MIN_CATALYST_SCORE = 70.0  # Catalyst score threshold for trading
 # ---- Loop Settings ----
 LOOP_SECONDS = 10
 SCAN_REFRESH_SECONDS = 300
@@ -31,8 +42,7 @@ SCORE_TOP_N_FROM_SCAN = 20
 TRADE_TOP_N = 12  # Top N scored candidates to evaluate (was 6, show more variety)
 
 ENTRY_OFFSET_PCT = 0.0005
-TAKE_PROFIT_R = 1.5
-INITIAL_RISK_ATR_MULT = 2.0
+STOP_LOSS_R = 2.0  # How many ATRs below entry is our hard stop
 TRAIL_ATR_MULT = 1.2
 
 MIN_PRICE = 5.0
@@ -176,7 +186,7 @@ def compute_open_risk_pct(ib: IB, equity: float, atr_cache: Dict[str, float]) ->
         sym = p.contract.symbol
         shares = abs(float(p.position))
         atr = atr_cache.get(sym, 0.0)
-        total_risk_usd += shares * (atr * INITIAL_RISK_ATR_MULT)
+        total_risk_usd += shares * (atr * STOP_LOSS_R)
 
     return total_risk_usd / equity
 
@@ -187,8 +197,25 @@ def main():
 
     ib = connect_ib()
 
+    # ====== INITIALIZE CATALYST ENGINE (PRIMARY) ======
+    research_engine = None
+    if CATALYST_ENGINE_AVAILABLE:
+        try:
+            finnhub_key = os.getenv("FINNHUB_API_KEY")
+            hunter = CatalystHunter(finnhub_api_key=finnhub_key)
+            scorer = CatalystScorer()
+            research_engine = ResearchEngine(
+                catalyst_hunter=hunter,
+                catalyst_scorer=scorer,
+            )
+            print("✅ [CATALYST ENGINE] Initialized (PRIMARY source)")
+        except Exception as e:
+            print(f"⚠️  [CATALYST ENGINE] Failed to init: {e}")
+            research_engine = None
+
     cached_scan = []
     last_scan_ts = 0.0
+    last_catalyst_hunt_ts = 0.0
     last_print_ts = 0.0
     last_symbols: List[str] = []
     
@@ -198,6 +225,10 @@ def main():
 
     atr_cache: Dict[str, float] = {}
     atr_cache_ts: Dict[str, float] = {}
+    
+    # Catalyst trading candidates cache
+    catalyst_candidates = []
+    catalyst_ranking = []
     
     # Track last bracket submission per symbol (for throttling)
     last_bracket_ts: Dict[str, float] = {}  # symbol -> timestamp of last bracket
@@ -218,17 +249,74 @@ def main():
                 last_session_date = current_session_date
                 print(f"[SESSION] Started with equity: ${equity:,.2f}")
 
-            # Refresh scanner periodically
+            # ====== CATALYST HUNTING (PRIMARY - every 5 minutes) ======
+            catalyst_hunt_interval = 300  # Hunt catalysts every 5 minutes
+            if research_engine and ((now - last_catalyst_hunt_ts) >= catalyst_hunt_interval or not catalyst_candidates):
+                try:
+                    catalyst_hunt_results = research_engine.hunt_all_sources()
+                    catalyst_ranking = research_engine.scorer.rank_opportunities(catalyst_hunt_results, max_results=20)
+                    catalyst_candidates = [opp.symbol for opp in catalyst_ranking[:10]]
+                    last_catalyst_hunt_ts = now
+                    print(f"[CATALYST] Found {len(catalyst_candidates)} high-quality opportunities")
+                except Exception as e:
+                    print(f"[CATALYST] hunt error: {e}")
+
+            # ====== SCANNER HUNTING (SECONDARY - fallback) ======
             if (now - last_scan_ts) >= SCAN_REFRESH_SECONDS or not cached_scan:
                 try:
                     cached_scan = scan_us_most_active_stocks(ib, limit=SCAN_LIMIT)
                     last_scan_ts = now
-                    print(f"[SCAN] refreshed: {len(cached_scan)}")
+                    print(f"[SCAN] refreshed: {len(cached_scan)} (fallback/validation)")
                 except Exception as e:
                     print(f"[SCAN] error: {e}")
 
-            scan_for_scoring = cached_scan[:SCORE_TOP_N_FROM_SCAN]
-            scored = score_scan_results(ib, scan_for_scoring, top_n=TRADE_TOP_N)
+            # ====== BLEND SOURCES: CATALYST PRIMARY + SCANNER FALLBACK ======
+            # Priority: 1) Catalyst candidates, 2) Scanner results
+            scored = []
+            
+            # First: use catalyst ranking directly (already scored by catalyst scorer)
+            if catalyst_ranking:
+                # catalyst_ranking is already a list of CatalystScore objects sorted by score
+                # Validate contracts with IB before scoring
+                catalyst_contracts = []
+                invalid_symbols = []
+                
+                for opp in catalyst_ranking[:TRADE_TOP_N]:
+                    try:
+                        c = Stock(opp.symbol, "SMART", "USD")
+                        # Try to qualify - this validates the symbol exists with IB
+                        qualified = ib.qualifyContracts(c)
+                        
+                        if qualified:
+                            # Valid contract - use it
+                            c.catalyst_score = opp.score
+                            catalyst_contracts.append(c)
+                        else:
+                            # Failed validation
+                            invalid_symbols.append(opp.symbol)
+                    except Exception as e:
+                        # Contract lookup failed
+                        invalid_symbols.append(opp.symbol)
+                
+                # Log invalid symbols only once per hunt cycle (debug level)
+                # Silently skip - debug info not needed for user
+                
+                scored.extend(catalyst_contracts)
+                print(f"  [CATALYST SCORED] {len(catalyst_contracts)} candidates ready (catalyst score source)")
+            
+            # Fallback: if not enough catalyst candidates, add scanner results
+            if len(scored) < TRADE_TOP_N:
+                scan_for_scoring = cached_scan[:SCORE_TOP_N_FROM_SCAN]
+                scanner_scored = score_scan_results(ib, scan_for_scoring, top_n=TRADE_TOP_N)
+                
+                # Dedup: don't include scanner results already in catalyst
+                catalyst_syms = set(s.symbol for s in scored)
+                scanner_only = [s for s in scanner_scored if s.symbol not in catalyst_syms]
+                
+                scored.extend(scanner_only[:max(0, TRADE_TOP_N - len(scored))])
+                
+                if scanner_only:
+                    print(f"  [SCANNER] Added {len(scanner_only[:max(0, TRADE_TOP_N - len(scored))])} fallback candidates")
 
             active = get_active_symbols(ib)
             current_symbols = [c.symbol for c in scored]
@@ -257,7 +345,8 @@ def main():
             should_print = (current_symbols != last_symbols) or ((now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS)
 
             if should_print:
-                print(f"\n--- Loop --- ARMED={armed} equity={equity:,.0f} open_risk={open_risk_pct:.3f} active={len(active)}")
+                engine_status = "🎯 CATALYST PRIMARY" if research_engine else "📊 SCANNER"
+                print(f"\n--- Loop --- ARMED={armed} equity={equity:,.0f} open_risk={open_risk_pct:.3f} active={len(active)} {engine_status}")
 
                 brackets_submitted_this_loop = 0  # Throttle: max 1 per loop
                 
@@ -272,6 +361,12 @@ def main():
                     if len(active) >= MAX_CONCURRENT_POSITIONS:
                         print("Max concurrent positions reached.")
                         break
+                    
+                    # ====== SCORE THRESHOLD CHECK (CATALYST ONLY) ======
+                    # Skip candidates from catalyst engine if below MIN_CATALYST_SCORE
+                    if hasattr(cand, 'catalyst_score') and cand.catalyst_score is not None:
+                        if cand.catalyst_score < MIN_CATALYST_SCORE:
+                            continue  # Skip silently - score too low
                     
                     # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
                     is_valid, reason = is_valid_stock_contract(ib, sym)
@@ -295,16 +390,19 @@ def main():
                         continue
 
                     # ====== CALCULATE SIZING ======
-                    stop_dist = atr * INITIAL_RISK_ATR_MULT
+                    # Risk unit = 1 ATR (will be multiplied by STOP_LOSS_R for actual stop distance)
                     risk_dollars = equity * RISK_PER_TRADE
-                    qty = int(risk_dollars // stop_dist)
+                    qty = int(risk_dollars // atr)
                     if qty <= 0:
                         continue
 
-                    # ====== FIX A: PRE-FLIGHT VALIDATION GATE ======
+                    # Calculate bracket levels:
+                    # - entry: where we buy
+                    # - stop_loss: hard downside protection (ATR-based risk management)
+                    # - trail_amt: upside capture (follows price up to lock in gains)
                     entry = px * (1 - ENTRY_OFFSET_PCT)
-                    tp = entry + (TAKE_PROFIT_R * stop_dist)
-                    trail_amt = atr * TRAIL_ATR_MULT
+                    stop_loss = entry - (STOP_LOSS_R * atr)  # DOWN from entry
+                    trail_amt = atr * TRAIL_ATR_MULT  # Upside capture
                     
                     # Triple-check before submission
                     if entry is None or entry <= 0:
@@ -338,13 +436,13 @@ def main():
                     
                     # ====== SIM MODE ======
                     if not armed:
-                        print(f"[SIM] {sym} qty={qty} entry={entry:.2f} tp={tp:.2f} trail={trail_amt:.2f}")
+                        print(f"[SIM] {sym} qty={qty} entry=${entry:.2f} stop_loss=${stop_loss:.2f} trail=${trail_amt:.2f}")
                         continue
 
                     # ====== SUBMIT BRACKET (ARMED MODE) ======
                     params = BracketParams(
                         symbol=sym, qty=qty,
-                        entry_limit=entry, take_profit=tp, trail_amount=trail_amt,
+                        entry_limit=entry, stop_loss=stop_loss, trail_amount=trail_amt,
                         tif="DAY"
                     )
                     res = place_limit_tp_trail_bracket(ib, params)

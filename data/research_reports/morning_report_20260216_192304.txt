@@ -1,0 +1,30 @@
+====================================================================================================
+                                🌅 CATALYST RESEARCH - MORNING REPORT                                
+                                   Generated: 2026-02-16 19:23:04                                   
+====================================================================================================
+
+📊 SUMMARY
+----------------------------------------------------------------------------------------------------
+Total sources scanned: 6 (News, Earnings, Trending, Social, Insiders, Options)
+Total catalyst stocks found: 44
+Ranked opportunities: 30
+Tradeable (score > 70): 0
+
+⚠️  NO HIGH-QUALITY CATALYSTS FOUND AT THIS TIME
+    Consider widening search criteria or waiting for stronger signals
+
+📡 SOURCES & METHODOLOGY
+----------------------------------------------------------------------------------------------------
+• FINNHUB: News, earnings surprises, company events
+• YAHOO: Trending stocks, volume anomalies
+• REDDIT: Sentiment & social engagement (r/stocks, r/investing, r/wsb)
+• SEC/INSIDER: Executive buying/selling activity
+• OPTIONS: Unusual volume & volatility activity
+• TECHNICAL: ATR, trend confirmation, volatility profiles
+
+⚙️  WEIGHTING
+----------------------------------------------------------------------------------------------------
+• Catalyst Score: 60% weight (primary signal)
+• Technical Score: 40% weight (validation)
+
+====================================================================================================
