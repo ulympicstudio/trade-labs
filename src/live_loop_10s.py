@@ -33,7 +33,7 @@ RISK_PER_TRADE = 0.005
 MAX_TOTAL_OPEN_RISK = 0.025
 MAX_CONCURRENT_POSITIONS = 6
 DAILY_KILL_SWITCH = 0.015  # placeholder (we'll wire true PnL next)
-MIN_CATALYST_SCORE = 70.0  # Catalyst score threshold for trading
+MIN_CATALYST_SCORE = 65.0  # Catalyst score threshold for trading (lowered to allow quality trending signals)
 # ---- Loop Settings ----
 LOOP_SECONDS = 10
 SCAN_REFRESH_SECONDS = 300
@@ -289,7 +289,7 @@ def main():
                         
                         if qualified:
                             # Valid contract - use it
-                            c.catalyst_score = opp.score
+                            c.catalyst_score = opp.combined_score
                             catalyst_contracts.append(c)
                         else:
                             # Failed validation
@@ -298,8 +298,9 @@ def main():
                         # Contract lookup failed
                         invalid_symbols.append(opp.symbol)
                 
-                # Log invalid symbols only once per hunt cycle (debug level)
-                # Silently skip - debug info not needed for user
+                # Log rejected symbols if any
+                if invalid_symbols:
+                    print(f"  [CATALYST REJECTED] {len(invalid_symbols)} invalid: {invalid_symbols[:5]}")
                 
                 scored.extend(catalyst_contracts)
                 print(f"  [CATALYST SCORED] {len(catalyst_contracts)} candidates ready (catalyst score source)")

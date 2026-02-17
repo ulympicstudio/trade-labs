@@ -98,12 +98,13 @@ class CatalystScorer:
         catalyst_score = self._calculate_catalyst_score(signals)
         
         # 2. Get technical score (if available)
-        technical_score = 0.0
+        # Default to 50.0 (neutral) if quant_scorer not available
+        technical_score = 50.0
         if self.quant_scorer:
             try:
                 technical_score = self.quant_scorer.score_symbol(symbol).final_score
             except:
-                technical_score = 50.0  # Neutral default
+                technical_score = 50.0  # Neutral default on error
         
         # 3. Calculate composite
         # 60% catalyst, 40% technical (catalyst-first mode)
