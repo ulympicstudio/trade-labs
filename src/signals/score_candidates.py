@@ -126,6 +126,7 @@ def score_scan_results(
     Uses historical bars only (stable, avoids streaming issues).
     """
     scored: List[ScoredCandidate] = []
+    rejected_summary = {"price": 0, "adv": 0, "atr": 0, "momentum": 0, "blocklist": 0}
 
     for r in scan_results[:max_scan]:
         sym = getattr(r, "symbol", None)
@@ -134,11 +135,11 @@ def score_scan_results(
             continue
 
         if sym in LEVERAGED_OR_INVERSE_BLOCKLIST:
-            print(f"  [SCORE] {sym} rejected: in LEVERAGED_OR_INVERSE_BLOCKLIST")
+            rejected_summary["blocklist"] += 1
             continue
 
         if sym in ETF_BLOCKLIST and sym not in ETF_ALLOWLIST:
-            print(f"  [SCORE] {sym} rejected: in ETF_BLOCKLIST")
+            rejected_summary["blocklist"] += 1
             continue
 
         try:
@@ -147,25 +148,23 @@ def score_scan_results(
             px = _last_close(df_d)
             atr14 = _atr14_from_daily(df_d)
             adv20 = _avg_dollar_volume_20d(df_d)
-            
-            print(f"  [SCORE] {sym} data: px=${px:.2f}, atr={atr14:.2f}, adv=${adv20/1e6:.1f}M, bars={len(df_d)}")
 
-            # HARD filters
+            # HARD filters (silent except summary)
             if math.isnan(px) or px < MIN_PRICE:
-                print(f"  [SCORE] {sym} rejected: price ${px:.2f} < ${MIN_PRICE}")
+                rejected_summary["price"] += 1
                 continue
             if math.isnan(adv20) or adv20 < MIN_AVG_DOLLAR_VOL_20D:
-                print(f"  [SCORE] {sym} rejected: ADV20=${adv20/1e6:.1f}M < ${MIN_AVG_DOLLAR_VOL_20D/1e6:.0f}M")
+                rejected_summary["adv"] += 1
                 continue
             if math.isnan(atr14) or atr14 < MIN_ATR14:
-                print(f"  [SCORE] {sym} rejected: ATR14={atr14:.2f} < {MIN_ATR14}")
+                rejected_summary["atr"] += 1
                 continue
 
             # Momentum (60 minutes)
             df_1m = _get_intraday_1m(ib, sym)
             mom = _momentum_pct_60m(df_1m)
             if math.isnan(mom):
-                print(f"  [SCORE] {sym} rejected: no 60m momentum")
+                rejected_summary["momentum"] += 1
                 continue
 
             # Score: momentum dominates; ATR gives swing preference
@@ -176,7 +175,7 @@ def score_scan_results(
                 f"LastClose=${px:.2f} | ADV20=${adv20/1e6:.1f}M | score={score:.2f}"
             )
             
-            print(f"  [SCORE] {sym} ACCEPTED: {reason}")
+            print(f"  [SCORE] {sym} ✓ {reason}")
 
             scored.append(ScoredCandidate(
                 symbol=sym,
@@ -194,4 +193,12 @@ def score_scan_results(
             continue
 
     scored.sort(key=lambda x: x.score, reverse=True)
+    
+    # Summary line
+    total_scanned = len(scan_results[:max_scan])
+    total_rejected = sum(rejected_summary.values())
+    if total_rejected > 0:
+        details = ", ".join(f"{k}={v}" for k, v in rejected_summary.items() if v > 0)
+        print(f"  [SCORE] Summary: scanned {total_scanned}, rejected {total_rejected} ({details}), kept {len(scored)}")
+    
     return scored[:top_n]
