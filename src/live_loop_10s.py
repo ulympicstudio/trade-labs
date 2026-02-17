@@ -84,20 +84,25 @@ def is_valid_stock_contract(ib: IB, symbol: str) -> Tuple[bool, str]:
         c = _contract(symbol)
         ib.qualifyContracts(c)
         
-        # Check secType
-        if c.secType not in ALLOWED_SEC_TYPES:
-            return False, f"secType={c.secType} not in {ALLOWED_SEC_TYPES}"
+        # Check secType (MUST be STK)
+        if c.secType != "STK":
+            return False, f"secType={c.secType} (not STK)"
         
         # Check primaryExchange
         if c.primaryExchange and c.primaryExchange not in ALLOWED_EXCHANGES:
             return False, f"exchange={c.primaryExchange} not allowed"
         
-        # Check longName for ETF keywords
-        if hasattr(c, 'contractDetails'):
-            long_name = (c.contractDetails.longName or "").upper()
-            for kw in ETF_KEYWORDS:
-                if kw in long_name:
-                    return False, f"longName contains '{kw}'"
+        # Fetch full contract details to check longName
+        try:
+            contract_details = ib.reqContractDetails(c)
+            if contract_details and len(contract_details) > 0:
+                long_name = (contract_details[0].longName or "").upper()
+                print(f"    [CHECK] {symbol} secType={c.secType} longName={long_name}")
+                for kw in ETF_KEYWORDS:
+                    if kw in long_name:
+                        return False, f"longName contains '{kw}'"
+        except Exception as e:
+            print(f"    [WARN] Could not fetch details for {symbol}: {e}")
         
         return True, ""
     except Exception as e:
@@ -364,6 +369,9 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping live loop.")
     finally:
+        # Clean up: give pending async tasks time to complete
+        ib.sleep(0.2)
+        
         # Cancel pending async tasks before disconnect
         import asyncio
         try:
@@ -372,6 +380,13 @@ def main():
                 task.cancel()
         except:
             pass
+        
+        # Force close connection
+        try:
+            ib.client.disconnect()
+        except:
+            pass
+        
         ib.disconnect()
         print("Disconnected.")
 
