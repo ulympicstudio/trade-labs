@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from ib_insync import IB, Stock, LimitOrder, Order
+from ib_insync import IB, Stock, LimitOrder, Order, TrailingStopOrder
 
 
 @dataclass
@@ -55,6 +55,7 @@ def place_limit_tp_trail_bracket(
         trade_parent = ib.placeOrder(c, parent)
         ib.sleep(0.2)
         parent_id = parent.orderId
+        print(f"  [DEBUG] Parent BUY order: id={parent_id}, qty={p.qty}, LMT={p.entry_limit:.2f}")
 
         # Child A: Take profit limit
         tp = LimitOrder("SELL", p.qty, round(p.take_profit, 2))
@@ -67,22 +68,29 @@ def place_limit_tp_trail_bracket(
         trade_tp = ib.placeOrder(c, tp)
         ib.sleep(0.2)
         tp_id = tp.orderId
+        print(f"  [DEBUG] TP SELL order: id={tp_id}, qty={p.qty}, LMT={p.take_profit:.2f}, parentId={parent_id}")
 
         # Child B: Trailing stop
-        # IB trailing stop uses orderType='TRAIL' with auxPrice as trail amount (in dollars).
-        trail = Order()
-        trail.action = "SELL"
-        trail.totalQuantity = p.qty
-        trail.orderType = "TRAIL"
-        trail.auxPrice = float(round(p.trail_amount, 4))  # trailing amount in $
+        # Use TrailingStopOrder for cleaner handling
+        trail = TrailingStopOrder(
+            action="SELL",
+            totalQuantity=p.qty,
+            trailingPercent=0,  # Use trailing amount in dollars (auxPrice)
+            auxPrice=float(round(p.trail_amount, 4))  # trailing amount in $
+        )
         trail.parentId = parent_id
         trail.tif = p.tif
         trail.ocaGroup = oca_group
         trail.ocaType = 1
         trail.transmit = True  # final child transmits whole bracket
 
+        print(f"  [DEBUG] Placing TRAIL order: qty={p.qty}, trail_amt=${p.trail_amount:.4f}, auxPrice={trail.auxPrice}")
         trade_trail = ib.placeOrder(c, trail)
         ib.sleep(0.2)
+        
+        if trail.orderId is None:
+            print(f"  [ERROR] TRAIL order failed - orderId is None")
+        
         trail_id = trail.orderId
 
         return BracketResult(
@@ -93,4 +101,8 @@ def place_limit_tp_trail_bracket(
             trail_id=trail_id
         )
     except Exception as e:
+        import traceback
+        print(f"  [ERROR] Bracket placement failed:")
+        print(f"    Message: {e}")
+        print(f"    Traceback: {traceback.format_exc()}")
         return BracketResult(ok=False, message=f"Bracket failed: {e}")
