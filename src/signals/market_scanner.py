@@ -28,8 +28,12 @@ _SCANNER_BACKOFF_BASE = 2.0  # seconds; retries wait 2, 4, 8 …
 
 
 def _looks_like_etf(long_name: str) -> bool:
-    name = (long_name or "").upper()
-    return any(tag in name for tag in (" ETF", "ETN", " TRUST", " FUND", " INDEX"))
+    if not long_name:
+        return False
+    name = long_name.upper()
+    # Check for ETF-like keywords (no leading space needed)
+    etf_keywords = ("ETF", "ETN", "TRUST", "FUND", "INDEX", "NOTES", "SECURITIES")
+    return any(tag in name for tag in etf_keywords)
 
 
 def _req_scanner_with_retry(ib: IB, sub: ScannerSubscription) -> list:
@@ -98,18 +102,36 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
 
     results = _req_scanner_with_retry(ib, sub)
     out: List[ScanResult] = []
+    filtered_count = 0
+    
     for r in results[:limit]:
         details = r.contractDetails
         c = details.contract
         symbol = c.symbol
 
-        if symbol in ETF_BLOCKLIST:
+        # Must be STK secType (explicit check)
+        if c.secType != "STK":
+            log.debug("Scanner: %s rejected (secType=%s, not STK)", symbol, c.secType)
+            filtered_count += 1
             continue
 
+        # Check blocklist first
+        if symbol in ETF_BLOCKLIST:
+            log.debug("Scanner: %s rejected (in ETF_BLOCKLIST)", symbol)
+            filtered_count += 1
+            continue
+
+        # Check if looks like ETF (unless in allowlist)
         if symbol not in ETF_ALLOWLIST and _looks_like_etf(details.longName):
+            log.debug("Scanner: %s rejected (longName='%s' looks like ETF)", symbol, details.longName)
+            filtered_count += 1
             continue
 
         out.append(ScanResult(symbol=symbol, rank=int(r.rank)))
+    
+    if filtered_count > 0:
+        log.info("Scanner: %d results filtered out (kept %d)", filtered_count, len(out))
+    
     return out
 
 
