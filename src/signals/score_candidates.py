@@ -147,6 +147,8 @@ def score_scan_results(
             px = _last_close(df_d)
             atr14 = _atr14_from_daily(df_d)
             adv20 = _avg_dollar_volume_20d(df_d)
+            
+            print(f"  [SCORE] {sym} data: px=${px:.2f}, atr={atr14:.2f}, adv=${adv20/1e6:.1f}M, bars={len(df_d)}")
 
             # HARD filters
             if math.isnan(px) or px < MIN_PRICE:
