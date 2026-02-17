@@ -130,7 +130,7 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
 
         # Check blocklist first
         if symbol in STOCK_BLOCKLIST:
-            print(f"[SCAN] {symbol} rejected: in STOCK_BLOCKLIST")
+            log.debug("Scanner: %s rejected (in blocklist)", symbol)
             filtered_count += 1
             continue
 
@@ -138,24 +138,24 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
         try:
             full_details = ib.reqContractDetails(c)
             if full_details and len(full_details) > 0:
-                long_name = (full_details[0].longName or "").upper()
-                print(f"[SCAN] {symbol:6} longName='{long_name}'")
+                long_name = (full_details[0].longName or "")
                 
                 # Check if looks like ETF (unless in allowlist)
                 if symbol not in STOCK_ALLOWLIST and _looks_like_etf(long_name):
-                    print(f"       → REJECTED (ETF keywords found)")
+                    log.debug("Scanner: %s rejected (longName='%s')", symbol, long_name)
                     filtered_count += 1
                     continue
-                else:
-                    print(f"       → ACCEPTED")
         except Exception as e:
-            print(f"[SCAN] {symbol} could not fetch details: {e}")
+            log.warning("Scanner: %s could not fetch details: %s", symbol, e)
+            # If we can't fetch details, skip it to be safe
             filtered_count += 1
             continue
 
         out.append(ScanResult(symbol=symbol, rank=int(r.rank)))
     
-    print(f"[SCAN] Summary: filtered {filtered_count}, kept {len(out)} stocks")
+    if filtered_count > 0:
+        log.info("Scanner: filtered %d ETF/products, kept %d stocks", filtered_count, len(out))
+    
     return out
 
 
