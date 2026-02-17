@@ -49,7 +49,7 @@ def _req_scanner_with_retry(ib: IB, sub: ScannerSubscription) -> list:
         errorCode = args[1] if len(args) > 1 else None
         if errorCode == 162:
             captured_162 = True
-            log.debug("IB error 162 (scanner cancel noise) – suppressed")
+            log.debug("IB error 162 (scanner cancel noise)")
 
     ib.errorEvent += _on_error
 
@@ -61,15 +61,18 @@ def _req_scanner_with_retry(ib: IB, sub: ScannerSubscription) -> list:
 
                 # Data came back → return it (162 on cancel is harmless)
                 if results:
+                    log.info("Scanner returned %d results (162 seen: %s)",
+                             len(results), captured_162)
                     return results
 
-                # No data and no 162 → market closed / no matches
-                if not captured_162:
+                # No data. If 162 fired → subscription failed, retry.
+                # If no 162 → market closed / no matches, return empty.
+                if captured_162:
+                    log.info("Scanner attempt %d/%d: empty + 162, retrying …",
+                             attempt, _SCANNER_MAX_RETRIES)
+                else:
+                    log.info("Scanner returned 0 results, no error")
                     return results
-
-                # Empty + 162  → subscription itself failed, worth retrying
-                log.info("Scanner attempt %d/%d: empty + 162, retrying …",
-                         attempt, _SCANNER_MAX_RETRIES)
 
             except Exception as e:
                 last_err = e
@@ -91,7 +94,6 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
         instrument="STK",
         locationCode="STK.US.MAJOR",
         scanCode="MOST_ACTIVE",
-        numberOfRows=max(limit, 50),   # ask IB for enough rows up front
     )
 
     results = _req_scanner_with_retry(ib, sub)
