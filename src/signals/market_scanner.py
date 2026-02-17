@@ -121,6 +121,13 @@ def scan_us_most_active(ib: IB, limit: int = 50) -> List[ScanResult]:
         details = r.contractDetails
         c = details.contract
         symbol = c.symbol
+        
+        # Quick price filter using scanner's reported price
+        scanner_price = getattr(r, "price", None)
+        if scanner_price and float(scanner_price) < 5.0:
+            log.debug("Scanner: %s rejected (scanner price=$%.2f < $5.0)", symbol, scanner_price)
+            filtered_count += 1
+            continue
 
         # Must be STK secType (explicit check)
         if c.secType != "STK":
