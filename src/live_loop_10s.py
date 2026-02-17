@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from typing import Set, List, Dict
 
 from ib_insync import IB, Stock, util
@@ -10,6 +11,9 @@ from config.ib_config import IB_HOST, IB_PORT, IB_CLIENT_ID
 from src.execution.bracket_orders import BracketParams, place_limit_tp_trail_bracket
 from src.signals.market_scanner import scan_us_most_active_stocks
 from src.signals.score_candidates import score_scan_results
+from src.risk.daily_pnl_manager import (
+    record_session_start_equity, is_kill_switch_active, get_kill_switch_status
+)
 
 
 # ---- Risk Framework ----
@@ -138,6 +142,10 @@ def main():
     last_scan_ts = 0.0
     last_print_ts = 0.0
     last_symbols: List[str] = []
+    
+    # Session tracking for daily kill switch
+    session_started = False
+    last_session_date = None
 
     atr_cache: Dict[str, float] = {}
     atr_cache_ts: Dict[str, float] = {}
@@ -149,6 +157,14 @@ def main():
             armed = is_armed()
 
             equity = get_equity(ib)
+            
+            # Record session start on first run or new trading day
+            current_session_date = datetime.utcnow().date()
+            if not session_started or last_session_date != current_session_date:
+                record_session_start_equity(equity)
+                session_started = True
+                last_session_date = current_session_date
+                print(f"[SESSION] Started with equity: ${equity:,.2f}")
 
             # Refresh scanner periodically
             if (now - last_scan_ts) >= SCAN_REFRESH_SECONDS or not cached_scan:
@@ -216,6 +232,11 @@ def main():
                     entry = px * (1 - ENTRY_OFFSET_PCT)
                     tp = entry + (TAKE_PROFIT_R * stop_dist)
                     trail_amt = atr * TRAIL_ATR_MULT
+
+                    # Check daily kill switch before placing any trade
+                    if is_kill_switch_active(ib):
+                        print(f"[KILL_SWITCH] Rejecting {sym}: daily loss threshold exceeded")
+                        continue
 
                     if not armed:
                         print(f"[SIM] {sym} qty={qty} entry={entry:.2f} tp={tp:.2f} trail={trail_amt:.2f}")

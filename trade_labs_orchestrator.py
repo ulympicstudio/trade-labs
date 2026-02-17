@@ -23,6 +23,7 @@ from src.utils.report_generator import ReportGenerator
 from src.utils.position_reconciler import PositionReconciler
 from src.utils.scheduler import create_standard_schedule, PipelineScheduler
 from src.data.ib_market_data import connect_ib
+from src.risk.daily_pnl_manager import get_kill_switch_status
 
 
 class TradeLabsOrchestrator:
@@ -141,7 +142,7 @@ class TradeLabsOrchestrator:
         return self.db.get_stats()
     
     def display_stats(self):
-        """Display trading statistics."""
+        """Display trading statistics and kill switch status."""
         stats = self.get_trading_stats()
         
         print(f"\n{'='*60}")
@@ -156,6 +157,41 @@ class TradeLabsOrchestrator:
         print(f"Win Rate:          {stats['win_rate']:.2f}%")
         print(f"Total PnL:         ${stats['total_pnl']:,.2f}")
         print(f"Avg Trade PnL:     ${stats['avg_trade_pnl']:,.2f}")
+        
+        # Display daily kill switch status
+        try:
+            ib = connect_ib()
+            ks_status = get_kill_switch_status(ib)
+            
+            print(f"\n{'='*60}")
+            print("Daily Kill Switch Status (Market Hours P&L Check)")
+            print(f"{'='*60}\n")
+            
+            if ks_status['session_date']:
+                print(f"Session Date:      {ks_status['session_date']}")
+            
+            if ks_status['start_equity']:
+                print(f"Session Start Eq:  ${ks_status['start_equity']:,.2f}")
+            else:
+                print(f"Session Start Eq:  Not recorded (auto-record at 9:30 AM)")
+            
+            print(f"Realized P&L:      ${ks_status['realized_pnl']:,.2f}")
+            print(f"Unrealized P&L:    ${ks_status['unrealized_pnl']:,.2f}")
+            print(f"Total Session P&L: ${ks_status['total_pnl']:,.2f}")
+            
+            if ks_status['pnl_percent']:
+                pnl_pct_str = f"{ks_status['pnl_percent']:.2f}%"
+                print(f"P&L % of Equity:   {pnl_pct_str}")
+            else:
+                print(f"P&L % of Equity:   Not applicable (session not started)")
+            
+            print(f"Kill Switch:       {'🔴 ACTIVE (new trades blocked)' if ks_status['is_active'] else '🟢 SAFE'}")
+            print(f"Threshold:         {ks_status['threshold_percent']:.2f}%")
+            
+            ib.disconnect()
+        except Exception as e:
+            print(f"\n[ERROR] Could not retrieve kill switch status: {e}")
+        
         print(f"{'='*60}\n")
     
     def create_scheduler(self) -> PipelineScheduler:
