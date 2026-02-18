@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import time
 import os
 import json
@@ -25,6 +28,24 @@ from src.signals.score_candidates import score_scan_results
 from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
 )
+from src.risk.regime import get_regime, RegimeResult
+from src.signals.signal_validator import (
+    compute_candidate_metrics,
+    passes_hyper_swing_filters,
+    CandidateMetrics,
+    fetch_spy_5m,
+)
+from src.quant.hyper_swing_filters import calc_momentum
+from config.risk_limits import (
+    MIN_UNIFIED_SCORE,
+    MIN_ADV20_DOLLARS,
+    MIN_ATR_PCT,
+    MIN_VOLUME_ACCEL,
+    MIN_RS_VS_SPY,
+    PRICE_MIN as CFG_PRICE_MIN,
+    PRICE_MAX as CFG_PRICE_MAX,
+    PRICE_MAX_ALLOWLIST,
+)
 
 # ====== CATALYST-DRIVEN TRADING ENGINE ======
 try:
@@ -44,7 +65,14 @@ BASE_MAX_TOTAL_OPEN_RISK = 0.02
 CONVICTION_MAX_TOTAL_OPEN_RISK = 0.045
 BASE_MAX_CONCURRENT_POSITIONS = 4
 CONVICTION_MAX_CONCURRENT_POSITIONS = 6
-MIN_CATALYST_SCORE = 65.0  # Catalyst score threshold for trading (lowered to allow quality trending signals)
+MIN_CATALYST_SCORE = 60.0  # Catalyst score threshold for trading (tuned for higher candidate flow)
+
+# Phase 2: Unified score weights
+UNIFIED_CATALYST_WEIGHT = 0.60
+UNIFIED_QUANT_WEIGHT    = 0.40
+# Regime-based risk scaling
+YELLOW_RISK_REDUCTION   = 0.75   # 25% risk haircut in YELLOW regime
+YELLOW_POSITION_PENALTY = 1      # Reduce max positions by 1
 
 LOSS_STREAK_LOOKBACK = 2
 LOSS_STREAK_PENALTY_TRADES = 3
@@ -55,10 +83,12 @@ PEAK_DRAWDOWN_RISK_PCT = 0.004
 # ---- Loop Settings ----
 LOOP_SECONDS = 10
 SCAN_REFRESH_SECONDS = 300
-SCAN_LIMIT = 30
+SCAN_LIMIT = 60
 SCORE_TOP_N_FROM_SCAN = 20
 TRADE_TOP_N = 12  # Top N scored candidates to evaluate (was 6, show more variety)
+CATALYST_TOP_N = 8
 MIN_CATALYSTS_FOR_SCAN = 3
+CATALYST_POOL_SIZE = 20
 
 ENTRY_OFFSET_PCT = 0.0005
 STOP_LOSS_R = 2.5  # How many ATRs below entry is our hard stop
@@ -66,7 +96,7 @@ TRAIL_ATR_MULT = 1.2
 TRAIL_ACTIVATE_ATR = 1.5
 TRAIL_CHECK_SECONDS = 30
 
-MIN_PRICE = 5.0
+MIN_PRICE = 2.0
 PRINT_HEARTBEAT_SECONDS = 60
 
 # Cache ATR so we don’t request daily bars repeatedly
@@ -78,9 +108,38 @@ BREADTH_SCAN_LIMIT = 15
 # Trade history for loss-streak tracking
 TRADES_FILE = Path("data/trade_history/trades.json")
 # ---- Bracket Throttling & Safety ----
-MAX_NEW_BRACKETS_PER_LOOP = 1           # Submit max 1 bracket per 10s loop
+MAX_NEW_BRACKETS_PER_LOOP = 2           # Submit max 2 brackets per 10s loop
 COOLDOWN_SECONDS_PER_SYMBOL = 300       # Don't retry same symbol for 5 min
-BRACKET_COOLDOWN_SECONDS = int(os.getenv("TRADE_LABS_BRACKET_COOLDOWN_SECONDS", "60"))
+BRACKET_COOLDOWN_SECONDS = int(os.getenv("TRADE_LABS_BRACKET_COOLDOWN_SECONDS", "20"))
+HYPER_RECHECK_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_SECONDS", "30"))
+HYPER_RECHECK_VOL_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_VOL_SECONDS", str(HYPER_RECHECK_SECONDS)))
+HYPER_RECHECK_VWAP_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_VWAP_SECONDS", str(HYPER_RECHECK_SECONDS)))
+HYPER_RECHECK_PRICECAP_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_PRICECAP_SECONDS", "900"))
+ENABLE_BOUNCE_MODE = os.getenv("TRADE_LABS_ENABLE_BOUNCE_MODE", "1") == "1"
+BOUNCE_MIN_PLAYBOOK_WIN_RATE = float(os.getenv("TRADE_LABS_BOUNCE_MIN_WIN_RATE", "0.0"))
+BOUNCE_MIN_PLAYBOOK_EXPECTANCY = float(os.getenv("TRADE_LABS_BOUNCE_MIN_EXPECTANCY", "-0.005"))
+BOUNCE_MIN_PLAYBOOK_SCORE = float(os.getenv("TRADE_LABS_BOUNCE_MIN_SCORE", "25"))
+BOUNCE_MAX_MAE_ABS = float(os.getenv("TRADE_LABS_BOUNCE_MAX_MAE_ABS", "0.09"))
+MIN_BOUNCE_SAMPLE_SIZE_FLOOR = 12
+BASE_MIN_UNIFIED_SCORE_FLOOR = 70.0
+CONVICTION_MIN_UNIFIED_SCORE_FLOOR = 68.0
+BOUNCE_MIN_UNIFIED_SCORE_FLOOR = 68.0
+BOUNCE_MIN_SAMPLE_SIZE = max(
+    MIN_BOUNCE_SAMPLE_SIZE_FLOOR,
+    int(os.getenv("TRADE_LABS_BOUNCE_MIN_SAMPLE_SIZE", str(MIN_BOUNCE_SAMPLE_SIZE_FLOOR))),
+)
+BASE_MIN_UNIFIED_SCORE = max(
+    BASE_MIN_UNIFIED_SCORE_FLOOR,
+    float(os.getenv("TRADE_LABS_BASE_MIN_UNIFIED_SCORE", str(float(MIN_UNIFIED_SCORE)))),
+)
+CONVICTION_MIN_UNIFIED_SCORE = max(
+    CONVICTION_MIN_UNIFIED_SCORE_FLOOR,
+    float(os.getenv("TRADE_LABS_CONVICTION_MIN_UNIFIED_SCORE", "68")),
+)
+BOUNCE_MIN_UNIFIED_SCORE = max(
+    BOUNCE_MIN_UNIFIED_SCORE_FLOOR,
+    float(os.getenv("TRADE_LABS_BOUNCE_MIN_UNIFIED_SCORE", "68")),
+)
 
 # Session-level invalid symbol cache (to suppress repeated IB errors)
 INVALID_SYMBOL_CACHE: Set[str] = set()
@@ -89,11 +148,86 @@ INVALID_SYMBOL_CACHE: Set[str] = set()
 TRAIL_STATE: Dict[str, str] = {}  # symbol -> "pending" | "activated"
 TRAIL_LOGGED: Set[str] = set()  # session-level dedup for activation logs
 
+# Symbol-level order lock: prevent duplicate entries
+SYMBOL_COOLDOWN_SECONDS = int(os.getenv("TRADE_LABS_SYMBOL_COOLDOWN_SECONDS", "900"))
+symbol_lock_ts: Dict[str, float] = {}  # symbol -> timestamp of last bracket attempt
+
+
+def is_symbol_locked(ib: IB, sym: str, symbol_lock_ts: Dict[str, float], now: float, cooldown: int) -> Tuple[bool, str]:
+    """
+    Check if a symbol is locked (can't place new bracket).
+    
+    Returns (locked: bool, reason: str):
+    - (True, "position_open") if symbol has non-zero position
+    - (True, "open_trade_status=...") if symbol in openTrades with non-terminal status
+    - (True, "trail_state_present") if symbol in TRAIL_STATE dict
+    - (True, "cooldown_active(...s)") if recent attempt within cooldown window
+    - (False, "unlocked") if available
+    """
+    # Check 1: Active position
+    try:
+        for pos in ib.positions():
+            if pos.contract.symbol == sym and pos.position != 0:
+                return True, "position_open"
+    except Exception as e:
+        pass  # Silent fail on IB error
+    
+    # Check 2: Open trades (check status)
+    try:
+        for trade in ib.openTrades():
+            if trade.contract.symbol == sym:
+                st = getattr(trade.orderStatus, "status", "")
+                if st not in ("Filled", "Cancelled", "Inactive"):
+                    return True, f"open_trade_status={st}"
+    except Exception as e:
+        pass  # Silent fail
+    
+    # Check 3: Trail state (symbol already has pending/active trail)
+    if sym in TRAIL_STATE:
+        return True, "trail_state_present"
+    
+    # Check 4: Recent bracket attempt cooldown
+    last = symbol_lock_ts.get(sym)
+    if last and (now - last) < cooldown:
+        remaining = int(cooldown - (now - last))
+        return True, f"cooldown_active({remaining}s)"
+    
+    return False, "unlocked"
+
 
 def connect_ib() -> IB:
     ib = IB()
     ib.RequestTimeout = 5
-    ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=10)
+
+    fallback_span = max(1, int(os.getenv("TRADE_LABS_IB_CLIENT_ID_SPAN", "10")))
+    last_error: Optional[Exception] = None
+    connected_client_id: Optional[int] = None
+
+    for offset in range(fallback_span):
+        client_id = IB_CLIENT_ID + offset
+        try:
+            ib.connect(IB_HOST, IB_PORT, clientId=client_id, timeout=10)
+            connected_client_id = client_id
+            break
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            if "already in use" in msg.lower() or "326" in msg:
+                print(f"[IB] clientId {client_id} busy, trying next...")
+            else:
+                print(f"[IB] connect failed with clientId {client_id}: {e}")
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+
+    if connected_client_id is None:
+        if last_error is not None:
+            raise last_error
+        raise ConnectionError("Unable to connect to IB: no available clientId")
+
+    if connected_client_id != IB_CLIENT_ID:
+        print(f"[IB] Connected using fallback clientId={connected_client_id} (base={IB_CLIENT_ID})")
 
     orig_error = ib.wrapper.error
     def quiet_error(reqId, errorCode, errorString, advancedOrderRejectJson=""):
@@ -148,10 +282,16 @@ def is_valid_stock_contract(
             if contract_details and len(contract_details) > 0:
                 long_name = (contract_details[0].longName or "").upper()
                 print(f"    [CHECK] {symbol} secType={c.secType} longName={long_name}")
-                for kw in ETF_KEYWORDS:
-                    # Use word boundary check to avoid false positives like "NETFLIX" containing "ETF"
-                    if re.search(rf"\b{re.escape(kw)}\b", long_name):
-                        return False, f"longName contains '{kw}'"
+                # Enhanced ETF/product filter — word-boundary regex to avoid
+                # false positives (e.g. NETFLIX does not contain \bETF\b).
+                _ETF_PATTERN = (
+                    r"\bETF\b|\bETN\b|\bTRUST\b|\bFUND\b|\bINDEX\b|\bNOTE\b|\bNOTES\b"
+                    r"|\bSECURITIES\b|\bULTRA\b|\bPROSHARES\b|\b2X\b|\b3X\b"
+                    r"|\bLEVERAGED\b|\bINVERSE\b"
+                )
+                if re.search(_ETF_PATTERN, long_name):
+                    matched = re.search(_ETF_PATTERN, long_name).group()
+                    return False, f"longName matched '{matched}'"
         except Exception as e:
             print(f"    [WARN] Could not fetch details for {symbol}: {e}")
         
@@ -397,6 +537,18 @@ def main():
     print(f"\n{SYSTEM_NAME} → {HUMAN_NAME}: Live Loop (10s)")
     print(f"MODE={'PAPER' if is_paper() else 'LIVE'} BACKEND={execution_backend()} ARMED={is_armed()}\n")
     print(f"[COOLDOWN] BRACKET_COOLDOWN_SECONDS={BRACKET_COOLDOWN_SECONDS}")
+    if ENABLE_BOUNCE_MODE:
+        print(
+            "[BOUNCE_CFG] "
+            f"min_unified={BOUNCE_MIN_UNIFIED_SCORE:.1f} "
+            f"base(wr={BOUNCE_MIN_PLAYBOOK_WIN_RATE*100:.1f}% score={BOUNCE_MIN_PLAYBOOK_SCORE:.1f} mae<={BOUNCE_MAX_MAE_ABS*100:.1f}%) "
+            f"requires_n>={BOUNCE_MIN_SAMPLE_SIZE}"
+        )
+    print(
+        f"[SCORE_CFG] base_min={BASE_MIN_UNIFIED_SCORE:.1f} "
+        f"conviction_min={CONVICTION_MIN_UNIFIED_SCORE:.1f} "
+        f"bounce_min={BOUNCE_MIN_UNIFIED_SCORE:.1f}"
+    )
 
     ib = connect_ib()
 
@@ -412,6 +564,10 @@ def main():
                 catalyst_scorer=scorer,
             )
             print("✅ [CATALYST ENGINE] Initialized (PRIMARY source)")
+            if getattr(hunter, "finnhub_key", None):
+                print("✅ [FINNHUB] configured")
+            else:
+                print("⚠️  [FINNHUB] missing/placeholder key; source will be skipped")
         except Exception as e:
             print(f"⚠️  [CATALYST ENGINE] Failed to init: {e}")
             research_engine = None
@@ -443,9 +599,13 @@ def main():
     # Track last bracket submission per symbol (for throttling)
     last_bracket_ts: Dict[str, float] = {}  # symbol -> timestamp of last bracket
     last_bracket_attempt_ts = 0.0
+    last_hyper_reject_ts: Dict[str, float] = {}  # symbol -> timestamp of most recent hyper-filter reject
+    last_hyper_reject_reason: Dict[str, str] = {}  # symbol -> last hyper-filter reject reason
     stop_order_ids: Dict[str, int] = {}
     entry_atr_by_symbol: Dict[str, float] = {}
     trail_active_symbols: Set[str] = set()
+    catalyst_rotation = 0
+    scanner_rotation = 0
 
     last_trail_check_ts = 0.0
     last_breadth_ts = 0.0
@@ -461,6 +621,7 @@ def main():
 
     trading_halted_for_day = False
     halted_date = None
+    force_kill_triggered = False
 
     try:
         while True:
@@ -501,16 +662,27 @@ def main():
                 trading_halted_for_day = False
                 halted_date = None
 
-            if is_kill_switch_active(ib):
+            force_kill = os.getenv("TRADE_LABS_FORCE_KILL") == "1" and not force_kill_triggered
+            if force_kill or is_kill_switch_active(ib):
                 if not trading_halted_for_day:
+                    if force_kill:
+                        print("[KILL_SWITCH] Forced trigger via TRADE_LABS_FORCE_KILL=1.")
+                        force_kill_triggered = True
+                        try:
+                            os.environ.pop("TRADE_LABS_FORCE_KILL", None)
+                        except:
+                            pass
                     print("[KILL_SWITCH] Triggered. Canceling orders and flattening positions.")
                     try:
+                        print("[KILL_SWITCH] Canceling all open orders...")
                         ib.reqGlobalCancel()
                     except Exception:
                         pass
+                    print("[KILL_SWITCH] Flattening positions...")
                     close_positions_by_weakness(ib, armed)
                     trading_halted_for_day = True
                     halted_date = current_session_date
+                    print("[KILL_SWITCH] Trading halted for the day.")
                 time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
                 continue
 
@@ -532,7 +704,10 @@ def main():
             if research_engine and ((now - last_catalyst_hunt_ts) >= catalyst_hunt_interval or not catalyst_candidates):
                 try:
                     catalyst_hunt_results = research_engine.hunt_all_sources()
-                    catalyst_ranking = research_engine.scorer.rank_opportunities(catalyst_hunt_results, max_results=20)
+                    catalyst_ranking = research_engine.scorer.rank_opportunities(
+                        catalyst_hunt_results,
+                        max_results=CATALYST_POOL_SIZE,
+                    )
                     catalyst_candidates = [opp.symbol for opp in catalyst_ranking[:10]]
                     last_catalyst_hunt_ts = now
                     catalyst_refreshed = True
@@ -558,8 +733,13 @@ def main():
                 # catalyst_ranking is already a list of CatalystScore objects sorted by score
                 # Validate contracts with IB before scoring
                 catalyst_contracts = []
+                if len(catalyst_ranking) > 0:
+                    rot = catalyst_rotation % len(catalyst_ranking)
+                    ranked_view = catalyst_ranking[rot:] + catalyst_ranking[:rot]
+                else:
+                    ranked_view = catalyst_ranking
                 
-                for opp in catalyst_ranking[:TRADE_TOP_N]:
+                for opp in ranked_view[:CATALYST_TOP_N]:
                     if opp.symbol in invalid_symbols:
                         continue
                     if opp.symbol in valid_contracts:
@@ -594,24 +774,33 @@ def main():
                 scored.extend(catalyst_contracts)
                 if catalyst_refreshed:
                     print(f"  [CATALYST SCORED] {len(catalyst_contracts)} candidates ready (catalyst score source)")
+                if catalyst_ranking:
+                    catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
             
-            # Fallback: only supplement if catalysts are scarce
-            if len(scored) < MIN_CATALYSTS_FOR_SCAN:
-                if (now - last_scan_score_ts) >= SCAN_REFRESH_SECONDS or not last_scanner_scored:
-                    scan_for_scoring = cached_scan[:SCORE_TOP_N_FROM_SCAN]
-                    last_scanner_scored = score_scan_results(ib, scan_for_scoring, top_n=TRADE_TOP_N)
-                    last_scan_score_ts = now
+            # Scanner supplement: always reserve diversity slots beyond catalyst picks
+            if (now - last_scan_score_ts) >= SCAN_REFRESH_SECONDS or not last_scanner_scored:
+                scan_for_scoring = cached_scan[:SCORE_TOP_N_FROM_SCAN]
+                last_scanner_scored = score_scan_results(ib, scan_for_scoring, top_n=TRADE_TOP_N)
+                last_scan_score_ts = now
 
-                scanner_scored = last_scanner_scored
-                
-                # Dedup: don't include scanner results already in catalyst
-                catalyst_syms = set(s.symbol for s in scored)
-                scanner_only = [s for s in scanner_scored if s.symbol not in catalyst_syms]
-                
-                scored.extend(scanner_only[:max(0, TRADE_TOP_N - len(scored))])
-                
-                if scanner_only:
-                    print(f"  [SCANNER] Added {len(scanner_only[:max(0, TRADE_TOP_N - len(scored))])} fallback candidates")
+            scanner_scored = last_scanner_scored
+            if scanner_scored:
+                rot = scanner_rotation % len(scanner_scored)
+                scanner_ranked_view = scanner_scored[rot:] + scanner_scored[:rot]
+                scanner_rotation = (scanner_rotation + 1) % len(scanner_scored)
+            else:
+                scanner_ranked_view = scanner_scored
+
+            # Dedup: don't include scanner results already in catalyst picks
+            catalyst_syms = set(s.symbol for s in scored)
+            scanner_only = [s for s in scanner_ranked_view if s.symbol not in catalyst_syms]
+
+            scanner_slots = max(0, TRADE_TOP_N - len(scored))
+            scanner_added = scanner_only[:scanner_slots]
+            scored.extend(scanner_added)
+
+            if scanner_added:
+                print(f"  [SCANNER] Added {len(scanner_added)} diversity candidates")
 
             active = get_active_symbols(ib)
             current_symbols = [c.symbol for c in scored]
@@ -634,11 +823,15 @@ def main():
                     if "earnings" in opp.best_catalyst_types and opp.confidence >= 0.9
                 )
 
+            # ====== REGIME FILTER (Phase 2) ======
+            regime = get_regime(ib, breadth_pct=last_breadth_pct)
+
             breadth_trigger = (last_breadth_pct is not None) and (last_breadth_pct >= BREADTH_ADV_THRESHOLD)
             conviction_mode = (
-                high_score_count >= 3
-                or earnings_high_conf_count >= 2
-                or breadth_trigger
+                (high_score_count >= 3
+                 or earnings_high_conf_count >= 2
+                 or breadth_trigger)
+                and regime.regime != "RED"   # Never convict in RED
             )
 
             # Build conviction reasons for audit trail
@@ -655,6 +848,11 @@ def main():
             max_concurrent_positions = (
                 CONVICTION_MAX_CONCURRENT_POSITIONS if conviction_mode else BASE_MAX_CONCURRENT_POSITIONS
             )
+
+            # Regime scaling
+            if regime.regime == "YELLOW":
+                risk_per_trade_pct *= YELLOW_RISK_REDUCTION
+                max_concurrent_positions = max(1, max_concurrent_positions - YELLOW_POSITION_PENALTY)
 
             drawdown_pct = 0.0
             if session_peak_equity > 0:
@@ -753,6 +951,10 @@ def main():
 
             should_print = (current_symbols != last_symbols) or ((now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS)
 
+            # Pre-compute SPY momentum once for all candidates
+            _spy_df = fetch_spy_5m(ib)
+            _spy_mom_30m = calc_momentum(_spy_df, 30) if _spy_df is not None else 0.0
+
             if should_print:
                 engine_status = "🎯 CATALYST PRIMARY" if research_engine else "📊 SCANNER"
                 if last_breadth_pct is not None:
@@ -761,34 +963,59 @@ def main():
                     breadth_pct_display = "n/a"
                 mode_label = "CONVICTION" if conviction_mode else "BASE"
                 conviction_audit = f" [{', '.join(conviction_reasons)}]" if conviction_mode else ""
+                regime_tag = f"regime={regime.regime}"
+                if regime.reasons:
+                    regime_tag += f" [{', '.join(regime.reasons[:2])}]"
                 print(
-                    f"\n--- Loop --- ARMED={armed} mode={mode_label}{conviction_audit} equity={equity:,.0f} "
-                    f"open_risk={open_risk_pct:.3f} active={len(active)} breadth={breadth_pct_display} {engine_status}"
+                    f"\n--- Loop --- ARMED={armed} mode={mode_label}{conviction_audit} {regime_tag} "
+                    f"equity={equity:,.0f} open_risk={open_risk_pct:.3f} active={len(active)} "
+                    f"breadth={breadth_pct_display} {engine_status}"
                 )
 
                 brackets_submitted_this_loop = 0  # Throttle: max 1 per loop
                 
+                # ====== REGIME GATE: RED → skip new entries ======
+                if regime.regime == "RED":
+                    print(f"[REGIME] RED — no new entries. Reasons: {', '.join(regime.reasons)}")
+
                 for cand in scored:
                     sym = cand.symbol
 
                     if sym in invalid_symbols:
                         continue
-                    
+
                     # Skip if already active
                     if sym in active:
                         continue
-                    
+
+                    # Skip recently hyper-rejected symbols to avoid re-check spam every loop
+                    last_hs_reject = last_hyper_reject_ts.get(sym, 0.0)
+                    last_hs_reason = last_hyper_reject_reason.get(sym, "")
+                    recheck_seconds = HYPER_RECHECK_SECONDS
+                    if "price below VWAP" in last_hs_reason:
+                        recheck_seconds = HYPER_RECHECK_VWAP_SECONDS
+                    elif "vol_accel" in last_hs_reason:
+                        recheck_seconds = HYPER_RECHECK_VOL_SECONDS
+                    elif " > max " in last_hs_reason:
+                        recheck_seconds = HYPER_RECHECK_PRICECAP_SECONDS
+
+                    if (now - last_hs_reject) < recheck_seconds:
+                        continue
+
+                    # Regime RED: block new entries entirely
+                    if regime.regime == "RED":
+                        break
+
                     # Skip if max positions reached
                     if len(active) >= max_concurrent_positions:
                         print("Max concurrent positions reached.")
                         break
-                    
+
                     # ====== SCORE THRESHOLD CHECK (CATALYST ONLY) ======
-                    # Skip candidates from catalyst engine if below MIN_CATALYST_SCORE
-                    if hasattr(cand, 'catalyst_score') and cand.catalyst_score is not None:
-                        if cand.catalyst_score < MIN_CATALYST_SCORE:
-                            continue  # Skip silently - score too low
-                    
+                    cat_score = getattr(cand, 'catalyst_score', None) or 0.0
+                    if cat_score < MIN_CATALYST_SCORE:
+                        continue
+
                     # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
                     is_valid, reason = is_valid_stock_contract(ib, sym, valid_contracts=valid_contracts)
                     if not is_valid:
@@ -797,35 +1024,138 @@ def main():
                             invalid_symbols_logged.add(sym)
                         invalid_symbols.add(sym)
                         continue
-                    
-                    # ====== GET PRICE & CHECK MIN ======
+
+                    # ====== QUANT VERIFICATION (Phase 2) ======
                     try:
-                        px = get_recent_price_1m(ib, sym)
+                        qm = compute_candidate_metrics(ib, sym, spy_mom_30m=_spy_mom_30m)
                     except Exception as e:
-                        print(f"[SKIP] {sym}: price fetch failed ({e})")
-                        continue
-                    
-                    if px < MIN_PRICE:
+                        print(f"[SKIP] {sym}: quant metrics failed ({e})")
                         continue
 
-                    # ====== GET ATR & CHECK VALIDITY ======
-                    atr = float(getattr(cand, "atr14", atr_cache.get(sym, 0.0)))
+                    if not qm.ok:
+                        print(f"[SKIP] {sym}: {qm.error}")
+                        continue
+
+                    # ---- Hyper-swing gates ----
+                    hs_cfg = dict(
+                        PRICE_MIN=CFG_PRICE_MIN,
+                        PRICE_MAX=CFG_PRICE_MAX,
+                        MIN_ATR_PCT=MIN_ATR_PCT,
+                        MIN_ADV20_DOLLARS=MIN_ADV20_DOLLARS,
+                        MIN_VOLUME_ACCEL=MIN_VOLUME_ACCEL,
+                        MIN_RS_VS_SPY=MIN_RS_VS_SPY,
+                        REQUIRE_ABOVE_VWAP=True,
+                        PRICE_MAX_ALLOWLIST=PRICE_MAX_ALLOWLIST,
+                    )
+                    hs_pass, hs_reason = passes_hyper_swing_filters(qm, config=hs_cfg)
+                    gate_tag = "MOMENTUM"
+                    gate_reason = hs_reason
+                    gate_pass = hs_pass
+
+                    bounce_pass = False
+                    bounce_reason = ""
+                    if not hs_pass and ENABLE_BOUNCE_MODE and regime.regime in ("GREEN", "YELLOW"):
+                        bounce_reject_reasons = []
+                        playbook_sample = max(0, int(getattr(qm, "playbook_sample_size_5d", 0) or 0))
+
+                        if playbook_sample < BOUNCE_MIN_SAMPLE_SIZE:
+                            bounce_reject_reasons.append(
+                                f"playbook_n {playbook_sample} < min {BOUNCE_MIN_SAMPLE_SIZE} (informational only)"
+                            )
+
+                        if qm.price < CFG_PRICE_MIN:
+                            bounce_reject_reasons.append(f"price ${qm.price:.2f} < min ${CFG_PRICE_MIN}")
+                        if qm.price > CFG_PRICE_MAX and sym not in PRICE_MAX_ALLOWLIST:
+                            bounce_reject_reasons.append(f"price ${qm.price:.2f} > max ${CFG_PRICE_MAX}")
+                        if qm.atr_percent < MIN_ATR_PCT:
+                            bounce_reject_reasons.append(f"atr% {qm.atr_percent:.3f} < {MIN_ATR_PCT}")
+                        if qm.adv20_dollars < MIN_ADV20_DOLLARS:
+                            bounce_reject_reasons.append(
+                                f"adv20 ${qm.adv20_dollars/1e6:.1f}M < ${MIN_ADV20_DOLLARS/1e6:.0f}M"
+                            )
+                        if qm.playbook_win_rate_5d < BOUNCE_MIN_PLAYBOOK_WIN_RATE:
+                            bounce_reject_reasons.append(
+                                f"playbook_wr {qm.playbook_win_rate_5d*100:.1f}% < {BOUNCE_MIN_PLAYBOOK_WIN_RATE*100:.1f}%"
+                            )
+                        if qm.playbook_expectancy_5d < BOUNCE_MIN_PLAYBOOK_EXPECTANCY:
+                            bounce_reject_reasons.append(
+                                f"playbook_exp {qm.playbook_expectancy_5d*100:+.2f}% < {BOUNCE_MIN_PLAYBOOK_EXPECTANCY*100:+.2f}%"
+                            )
+                        if qm.playbook_score < BOUNCE_MIN_PLAYBOOK_SCORE:
+                            bounce_reject_reasons.append(
+                                f"playbook_score {qm.playbook_score:.1f} < {BOUNCE_MIN_PLAYBOOK_SCORE:.1f}"
+                            )
+                        if abs(min(0.0, qm.playbook_mae_5d)) > BOUNCE_MAX_MAE_ABS:
+                            bounce_reject_reasons.append(
+                                f"playbook_mae {qm.playbook_mae_5d*100:+.2f}% worse than -{BOUNCE_MAX_MAE_ABS*100:.2f}%"
+                            )
+
+                        if not bounce_reject_reasons:
+                            bounce_pass = True
+                            bounce_reason = (
+                                f"[BOUNCE_PASS] {sym}: "
+                                f"wr={qm.playbook_win_rate_5d*100:.1f}% exp={qm.playbook_expectancy_5d*100:+.2f}% "
+                                f"score={qm.playbook_score:.1f} mae={qm.playbook_mae_5d*100:+.2f}% n={playbook_sample} "
+                                f"atr%={qm.atr_percent*100:.2f}% adv=${qm.adv20_dollars/1e6:.0f}M regime={regime.regime}"
+                            )
+                        else:
+                            bounce_reason = f"[BOUNCE_REJECT] {' | '.join(bounce_reject_reasons)}"
+
+                    if not hs_pass and bounce_pass:
+                        gate_tag = "BOUNCE"
+                        gate_reason = bounce_reason
+                        gate_pass = True
+
+                    if not gate_pass:
+                        last_hyper_reject_ts[sym] = now
+                        last_hyper_reject_reason[sym] = f"{hs_reason} || {bounce_reason}" if bounce_reason else hs_reason
+                        print(f"[HYPER_FILTER] {sym}: {hs_reason}")
+                        if bounce_reason:
+                            print(f"[BOUNCE_FILTER] {sym}: {bounce_reason}")
+                        continue
+                    last_hyper_reject_ts.pop(sym, None)
+                    last_hyper_reject_reason.pop(sym, None)
+                    print(gate_reason)
+
+                    # ---- Unified score ----
+                    unified = (UNIFIED_CATALYST_WEIGHT * cat_score
+                               + UNIFIED_QUANT_WEIGHT * qm.quant_score)
+                    if gate_tag == "BOUNCE":
+                        required_unified = BOUNCE_MIN_UNIFIED_SCORE
+                    else:
+                        required_unified = CONVICTION_MIN_UNIFIED_SCORE if conviction_mode else BASE_MIN_UNIFIED_SCORE
+                    if unified < required_unified:
+                        print(
+                            f"[SCORE] {sym}: unified={unified:.1f} < {required_unified:.1f} "
+                            f"(mode={gate_tag} cat={cat_score:.0f} quant={qm.quant_score:.0f})"
+                        )
+                        continue
+
+                    # ---- Candidate summary ----
+                    print(
+                        f"  ✅ [{gate_tag}] {sym}  unified={unified:.1f} cat={cat_score:.0f} quant={qm.quant_score:.0f}  "
+                        f"mom30={qm.momentum_30m*100:+.2f}% vol_accel={qm.volume_accel:.2f} "
+                        f"RS30mΔ={qm.rel_strength_vs_spy*100:+.2f}% atr%={qm.atr_percent*100:.2f}% "
+                        f"adv=${qm.adv20_dollars/1e6:.0f}M playbook={qm.playbook_score:.0f} n={qm.playbook_sample_size_5d}"
+                    )
+
+                    # ====== USE QUANT METRICS for price/ATR ======
+                    px = qm.price
+                    atr = qm.atr14
+                    # Sync ATR cache from quant verification
+                    if atr > 0:
+                        atr_cache[sym] = atr
                     if not math.isfinite(atr) or atr <= 0:
                         continue
 
                     # ====== CALCULATE SIZING ======
-                    # Risk unit = 1 ATR (will be multiplied by STOP_LOSS_R for actual stop distance)
                     risk_dollars = equity * risk_per_trade_pct
                     qty = int(risk_dollars // atr)
                     if qty <= 0:
                         continue
 
-                    # Calculate bracket levels:
-                    # - entry: where we buy
-                    # - stop_loss: hard downside protection (ATR-based risk management)
-                    # - trail_amt: upside capture (follows price up to lock in gains)
                     entry = px * (1 - ENTRY_OFFSET_PCT)
-                    stop_loss = entry - (STOP_LOSS_R * atr)  # DOWN from entry
+                    stop_loss = entry - (STOP_LOSS_R * atr)
                     trail_amt = 0.0  # Delayed trailing stop activation
                     trail_activate_px = entry + (TRAIL_ACTIVATE_ATR * atr)
                     
@@ -869,13 +1199,20 @@ def main():
                         print(f"[THROTTLE] {sym}: max {MAX_NEW_BRACKETS_PER_LOOP} bracket(s) per loop reached")
                         break
                     
+                    # ====== CHECK SYMBOL LOCK: NO DUPLICATE ENTRIES ======
+                    locked, lock_reason = is_symbol_locked(ib, sym, symbol_lock_ts, now, SYMBOL_COOLDOWN_SECONDS)
+                    if locked:
+                        print(f"[LOCK] {sym}: {lock_reason}, skipping")
+                        continue
+                    
                     # ====== SIM MODE ======
                     if not armed:
                         print(
-                            f"[SIM] {sym} qty={qty} entry=${entry:.2f} stop_loss=${stop_loss:.2f} "
-                            f"trail=PENDING (activate>${trail_activate_px:.2f}) risk={risk_per_trade_pct:.3%}"
+                            f"[SIM] {sym} unified={unified:.0f} qty={qty} entry=${entry:.2f} stop=${stop_loss:.2f} "
+                            f"trail=PENDING (>{trail_activate_px:.2f}) risk={risk_per_trade_pct:.3%}"
                         )
                         last_bracket_attempt_ts = now
+                        symbol_lock_ts[sym] = now  # Lock immediately after attempt
                         brackets_submitted_this_loop += 1
                         break
 
@@ -888,6 +1225,7 @@ def main():
                     res = place_limit_tp_trail_bracket(ib, params)
                     print(f"[IB] {sym} -> {res.ok} {res.message}")
                     last_bracket_attempt_ts = now
+                    symbol_lock_ts[sym] = now  # Lock immediately after attempt (success or fail)
                     brackets_submitted_this_loop += 1
                     
                     if res.ok:
