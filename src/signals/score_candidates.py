@@ -202,3 +202,6 @@ def score_scan_results(
         print(f"  [SCORE] Summary: scanned {total_scanned}, rejected {total_rejected} ({details}), kept {len(scored)}")
     
     return scored[:top_n]
+# Backwards-compatible alias for older imports/tests
+def score_candidates(*args, **kwargs):
+    return score_scan_results(*args, **kwargs)
