@@ -92,6 +92,7 @@ TRADE_TOP_N = 12  # Top N scored candidates to evaluate (was 6, show more variet
 # ---- CandidatePool settings ----
 REFILL_THRESHOLD = 40   # refill pool when it drops below this
 BATCH_SIZE = 25         # symbols popped per loop iteration
+SCANNER_SCORE_INTERVAL_SECONDS = 60  # min seconds between scanner scoring runs
 CATALYST_TOP_N = 8
 MIN_CATALYSTS_FOR_SCAN = 3
 CATALYST_POOL_SIZE = 20
@@ -797,9 +798,11 @@ def main():
                     catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
             
             # Scanner supplement: score the current batch from the pool
-            if scan_batch:
+            # Only rescore when we have a fresh batch AND the interval has elapsed.
+            if scan_batch and (now - last_scan_score_ts) >= SCANNER_SCORE_INTERVAL_SECONDS:
                 last_scanner_scored = score_scan_results(ib, scan_batch, top_n=TRADE_TOP_N)
                 last_scan_score_ts = now
+                print(f"[SCAN] scored {len(scan_batch)} batch -> {len(last_scanner_scored)} passed")
 
             scanner_scored = last_scanner_scored
             if scanner_scored:
