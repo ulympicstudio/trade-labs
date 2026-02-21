@@ -728,6 +728,14 @@ def main():
                     last_scan_ts = now
                     added = candidate_pool.add_many(cached_scan)
                     print(f"[SCAN] refreshed: {len(cached_scan)} scanned, {added} new into pool")
+                    # Guard: if every symbol was already seen and pool is
+                    # still empty/below threshold, force-reset once so we
+                    # don't stall the loop.
+                    if added == 0 and candidate_pool.size() < REFILL_THRESHOLD:
+                        print("[POOL] refill produced 0 new symbols; resetting pool and retrying once")
+                        candidate_pool.clear()
+                        added = candidate_pool.add_many(cached_scan)
+                        print(f"[SCAN] retry: {added} symbols into pool after reset")
                 except Exception as e:
                     print(f"[SCAN] error: {e}")
 
