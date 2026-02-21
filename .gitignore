@@ -15,3 +15,4 @@ logs/
 *.jsonl
 hybrid_scan_*.json
 EOF
+data/*.db
