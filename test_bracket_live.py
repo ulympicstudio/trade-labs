@@ -37,10 +37,10 @@ if not scored:
 
 # Show the bracket that would be placed
 top_stock = scored[0]
-symbol = top_stock['symbol']
-px = top_stock['lastClose']
-atr = top_stock['atr14']
-momentum = top_stock['momentum60m']
+symbol = top_stock.symbol
+px = top_stock.lastClose
+atr = top_stock.atr14
+momentum = top_stock.momentum60m
 
 print(f"[TEST] Top candidate: {symbol}")
 print(f"  Price: ${px:.2f}")
