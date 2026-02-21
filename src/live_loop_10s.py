@@ -25,6 +25,7 @@ from src.execution.bracket_orders import (
 )
 from src.signals.market_scanner import scan_us_most_active_stocks
 from src.signals.candidate_pool import CandidatePool
+from src.signals.scan_rotator import ScanRotator
 from src.signals.score_candidates import score_scan_results
 from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
@@ -580,6 +581,7 @@ def main():
     cached_scan = []
     last_scan_ts = 0.0
     candidate_pool = CandidatePool()
+    scan_rotator = ScanRotator()
     last_catalyst_hunt_ts = 0.0
     last_print_ts = 0.0
     last_symbols: List[str] = []
@@ -721,10 +723,10 @@ def main():
                 except Exception as e:
                     print(f"[CATALYST] hunt error: {e}")
 
-            # ====== SCANNER HUNTING via CandidatePool ======
+            # ====== SCANNER HUNTING via ScanRotator + CandidatePool ======
             if candidate_pool.size() < REFILL_THRESHOLD:
                 try:
-                    cached_scan = scan_us_most_active_stocks(ib, limit=SCAN_LIMIT)
+                    cached_scan = scan_rotator.next_scan(ib, limit=SCAN_LIMIT)
                     last_scan_ts = now
                     added = candidate_pool.add_many(cached_scan)
                     print(f"[SCAN] refreshed: {len(cached_scan)} scanned, {added} new into pool")
