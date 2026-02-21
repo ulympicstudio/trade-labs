@@ -33,3 +33,36 @@ def score_candidates(*args, **kwargs):
                 ib.disconnect()
         except Exception:
             pass
+        # ----------------------------
+# Backwards-compatibility layer
+# ----------------------------
+def score_candidates(*args, **kwargs):
+    """
+    Backwards compatible wrapper.
+
+    Supports:
+      score_candidates(scan_results, top_n=5)
+      score_candidates(ib, scan_results, top_n=5)
+    """
+    if len(args) == 0:
+        raise TypeError("score_candidates requires scan_results (or ib, scan_results)")
+
+    first = args[0]
+    has_ib = hasattr(first, "isConnected") and hasattr(first, "reqMktData")
+
+    if has_ib:
+        return score_scan_results(*args, **kwargs)
+
+    scan_results = args[0]
+    rest = args[1:]
+
+    from src.broker.ib_session import get_ib
+    ib = get_ib()
+    try:
+        return score_scan_results(ib, scan_results, *rest, **kwargs)
+    finally:
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+        except Exception:
+            pass
