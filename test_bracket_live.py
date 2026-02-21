@@ -9,7 +9,7 @@ Key points:
 """
 
 import os
-
+import math
 import pytest
 
 # Force safe defaults
@@ -59,21 +59,32 @@ def test_bracket_live_sim():
         atr = float(top.atr14 or 0.0)
         momentum = float(top.momentum_pct_60m or 0.0)
 
-        # 3) Fetch live-ish quote for price
+        # 3) Fetch quote for price
         bid, ask, last = get_quote(ib, symbol)
-        px = last if last is not None else ((bid + ask) / 2.0 if (bid is not None and ask is not None) else None)
+        px = (
+            last
+            if last is not None
+            else ((bid + ask) / 2.0 if (bid is not None and ask is not None) else None)
+        )
 
         if px is None:
             pytest.skip(f"No quote available for {symbol} (bid/ask/last all None).")
 
         px = float(px)
 
+        # IB can return NaN/inf (often due to missing real-time market data subscription).
+        # If px is NaN/inf, skip instead of failing the suite.
+        if not math.isfinite(px) or px <= 0:
+            pytest.skip(
+                f"Price not usable for {symbol} (px={px}). Likely delayed/unsubscribed market data."
+            )
+
         print(f"[TEST] Top candidate: {symbol}")
         print(f"  Price (quote): ${px:.2f}")
         print(f"  ATR14:         ${atr:.2f}")
         print(f"  Momentum60m:   {momentum:.2%}")
         print(f"  Score:         {top.score:.2f}")
-        if top.reason:
+        if getattr(top, "reason", None):
             print(f"  Reason:        {top.reason}")
         print()
 
