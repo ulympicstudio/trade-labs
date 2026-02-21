@@ -153,3 +153,38 @@ def place_limit_tp_trail_bracket(
         print(f"    Message: {e}")
         print(f"    Traceback: {traceback.format_exc()}")
         return BracketResult(ok=False, message=f"Bracket failed: {e}")
+
+
+def place_trailing_stop(
+    ib: IB,
+    symbol: str,
+    qty: int,
+    trail_amount: float,
+    tif: str = "DAY",
+) -> BracketResult:
+    """Place a standalone trailing-stop SELL order (no bracket parent).
+
+    This is a backwards-compatible alias used by live_loop_10s to attach a
+    trailing stop *after* a position is already open.
+    """
+    try:
+        c = _contract(symbol)
+        ib.qualifyContracts(c)
+        trail_order = Order(
+            action="SELL",
+            orderType="TRAIL",
+            totalQuantity=qty,
+            auxPrice=trail_amount,
+            tif=tif,
+            transmit=True,
+        )
+        trade = ib.placeOrder(c, trail_order)
+        ib.sleep(0.5)
+        trail_id = trade.order.orderId
+        return BracketResult(
+            ok=True,
+            message=f"Trailing stop placed for {symbol}",
+            trail_id=trail_id,
+        )
+    except Exception as e:
+        return BracketResult(ok=False, message=f"Trailing stop failed: {e}")
