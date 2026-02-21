@@ -1,11 +1,8 @@
 """
-regime.py
+risk/regime.py
 
-Minimal market regime detector used by live_loop_10s.
-
-This is intentionally conservative and lightweight:
-- If we cannot compute a regime reliably, we return NORMAL.
-- You can later upgrade this to use SPY/QQQ trend + vol + breadth.
+Minimal regime detector used by live_loop_10s.
+Safe defaults: if anything fails, return YELLOW (neutral).
 """
 
 from __future__ import annotations
@@ -16,20 +13,24 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class RegimeResult:
-    name: str  # e.g., "NORMAL", "RISK_OFF", "RISK_ON"
-    confidence: float  # 0.0 - 1.0
-    reason: str = ""
+    # live_loop_10s expects: regime.regime
+    regime: str  # "GREEN" | "YELLOW" | "RED"
+    confidence: float = 0.5
+    reason: str = "default-neutral"
+    # Optional metadata (won't break if unused)
+    vol: Optional[float] = None
+    trend: Optional[float] = None
 
 
 def get_regime(*args, **kwargs) -> RegimeResult:
     """
-    Placeholder regime classifier.
-
-    live_loop_10s imports this, so we provide a stable API now.
-    Later: accept ib + symbols, compute trend/volatility, etc.
+    Minimal implementation:
+    - Returns a neutral regime unless you later implement real logic.
+    - Signature accepts anything so callers don't break.
     """
-    return RegimeResult(
-        name="NORMAL",
-        confidence=0.5,
-        reason="Regime module placeholder (default NORMAL)",
-    )
+    return RegimeResult(regime="YELLOW", confidence=0.5, reason="placeholder")
+
+
+# Backwards/alternate naming safety (in case older code expects it)
+def get_market_regime(*args, **kwargs) -> RegimeResult:
+    return get_regime(*args, **kwargs)
