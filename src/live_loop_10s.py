@@ -24,6 +24,7 @@ from src.execution.bracket_orders import (
     place_trailing_stop,
 )
 from src.signals.market_scanner import scan_us_most_active_stocks
+from src.signals.candidate_pool import CandidatePool
 from src.signals.score_candidates import score_scan_results
 from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
@@ -86,6 +87,10 @@ SCAN_REFRESH_SECONDS = 300
 SCAN_LIMIT = 60
 SCORE_TOP_N_FROM_SCAN = 20
 TRADE_TOP_N = 12  # Top N scored candidates to evaluate (was 6, show more variety)
+
+# ---- CandidatePool settings ----
+REFILL_THRESHOLD = 40   # refill pool when it drops below this
+BATCH_SIZE = 25         # symbols popped per loop iteration
 CATALYST_TOP_N = 8
 MIN_CATALYSTS_FOR_SCAN = 3
 CATALYST_POOL_SIZE = 20
@@ -574,6 +579,7 @@ def main():
 
     cached_scan = []
     last_scan_ts = 0.0
+    candidate_pool = CandidatePool()
     last_catalyst_hunt_ts = 0.0
     last_print_ts = 0.0
     last_symbols: List[str] = []
@@ -715,14 +721,17 @@ def main():
                 except Exception as e:
                     print(f"[CATALYST] hunt error: {e}")
 
-            # ====== SCANNER HUNTING (SECONDARY - fallback) ======
-            if (now - last_scan_ts) >= SCAN_REFRESH_SECONDS or not cached_scan:
+            # ====== SCANNER HUNTING via CandidatePool ======
+            if candidate_pool.size() < REFILL_THRESHOLD:
                 try:
                     cached_scan = scan_us_most_active_stocks(ib, limit=SCAN_LIMIT)
                     last_scan_ts = now
-                    print(f"[SCAN] refreshed: {len(cached_scan)} (fallback/validation)")
+                    added = candidate_pool.add_many(cached_scan)
+                    print(f"[SCAN] refreshed: {len(cached_scan)} scanned, {added} new into pool")
                 except Exception as e:
                     print(f"[SCAN] error: {e}")
+
+            scan_batch = candidate_pool.pop_many(BATCH_SIZE)
 
             # ====== BLEND SOURCES: CATALYST PRIMARY + SCANNER FALLBACK ======
             # Priority: 1) Catalyst candidates, 2) Scanner results
@@ -777,10 +786,9 @@ def main():
                 if catalyst_ranking:
                     catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
             
-            # Scanner supplement: always reserve diversity slots beyond catalyst picks
-            if (now - last_scan_score_ts) >= SCAN_REFRESH_SECONDS or not last_scanner_scored:
-                scan_for_scoring = cached_scan[:SCORE_TOP_N_FROM_SCAN]
-                last_scanner_scored = score_scan_results(ib, scan_for_scoring, top_n=TRADE_TOP_N)
+            # Scanner supplement: score the current batch from the pool
+            if scan_batch:
+                last_scanner_scored = score_scan_results(ib, scan_batch, top_n=TRADE_TOP_N)
                 last_scan_score_ts = now
 
             scanner_scored = last_scanner_scored
