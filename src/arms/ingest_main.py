@@ -4,80 +4,51 @@ import logging
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode
 
-    # Get or create per-symbol RNG (seeded by symbol hash for reproducibility)
-    rng = _SYNTH_RNGS.get(symbol)
-    if rng is None:
-        rng = random.Random(hash(symbol) & 0xFFFF_FFFF)
-        _SYNTH_RNGS[symbol] = rng
+# Get or create per-symbol RNG (seeded by symbol hash for reproducibility)
 
-    # Per-symbol drift / vol params (created once)
-    if symbol not in _SYNTH_PARAMS:
-        drift = rng.uniform(-0.00002, 0.00002)
-        vol = rng.uniform(0.0006, 0.0020)  # 0.06 % – 0.20 % per tick
-        _SYNTH_PARAMS[symbol] = (drift, vol)
-    drift, vol = _SYNTH_PARAMS[symbol]
+# Per-symbol drift / vol params (created once)
 
-    prev = _SYNTH_PREV_LAST.get(
-        symbol, _SYNTH_SEED_PRICES.get(symbol.upper(), _SYNTH_DEFAULT_SEED)
-    )
-    ret = rng.normalvariate(drift, vol)
-    last = round(prev * (1.0 + ret), 2)
-    if last <= 0:
-        last = prev  # safety: never go negative
-    _SYNTH_PREV_LAST[symbol] = last
 
-    vol = _SYNTH_VOLUME_CTR.get(symbol, 0) + rng.randint(500, 5000)
-    _SYNTH_VOLUME_CTR[symbol] = vol
 
-    return MarketSnapshot(
-        symbol=symbol,
-        last=last,
-        bid=round(last * 0.999, 2),
-        ask=round(last * 1.001, 2),
-        vwap=last,
-        volume=vol,
-        cum_volume=vol,   # synthetic: volume IS cumulative
-        session="SYNTH",
-    )
 
 
 def _handle_signal(signum, _frame):
-    global _running, _stopping
-    log.info("Received shutdown signal (%s)", signum)
-    _running = False
-    _stopping = True
-    _stop_event.set()
+global _running, _stopping
+log.info("Received shutdown signal (%s)", signum)
+_running = False
+_stopping = True
+_stop_event.set()
 
 
 def _interruptible_sleep(seconds: float, *, resolution: float = 1.0) -> None:
-    resolution = min(resolution, 1.0)  # enforce <=1 s upper bound
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if _stop_event.is_set():
-            return
-        remaining = deadline - time.monotonic()
-        _stop_event.wait(min(resolution, max(remaining, 0)))
+resolution = min(resolution, 1.0)  # enforce <=1 s upper bound
+deadline = time.monotonic() + seconds
+while time.monotonic() < deadline:
+if _stop_event.is_set():
+return
+remaining = deadline - time.monotonic()
+_stop_event.wait(min(resolution, max(remaining, 0)))
 
 
 # ── IB market-data helpers (optional) ────────────────────────────────
 
 def _try_connect_ib():
-    if _stopping:
-        return None
-    try:
-        from ib_insync import Stock
-        from src.data.ib_market_data import get_last_price
+if _stopping:
+return None
+try:
+from ib_insync import Stock
+from src.data.ib_market_data import get_last_price
 
-        contract = Stock(symbol, "SMART", "USD")
-        ib.qualifyContracts(contract)
-        price = get_last_price(ib, contract)
-        return MarketSnapshot(
-            symbol=symbol,
-            last=price,
-            bid=price,   # best-effort; real depth requires streaming
-            ask=price,
-        )
-    except Exception as exc:
+contract = Stock(symbol, "SMART", "USD")
+ib.qualifyContracts(contract)
+price = get_last_price(ib, contract)
+return MarketSnapshot(
+symbol=symbol,
+last=price,
+bid=price,   # best-effort; real depth requires streaming
+ask=price,
+)
+except Exception as exc:
         log.warning("IB snapshot for %s failed: %s", symbol, exc)
         return None
 
