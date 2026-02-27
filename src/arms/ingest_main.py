@@ -13,6 +13,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 
 
 def _handle_signal(signum, _frame):
+    pass
 global _running, _stopping
 log.info("Received shutdown signal (%s)", signum)
 _running = False
@@ -21,6 +22,7 @@ _stop_event.set()
 
 
 def _interruptible_sleep(seconds: float, *, resolution: float = 1.0) -> None:
+    pass
 resolution = min(resolution, 1.0)  # enforce <=1 s upper bound
 deadline = time.monotonic() + seconds
 while time.monotonic() < deadline:
@@ -33,6 +35,7 @@ _stop_event.wait(min(resolution, max(remaining, 0)))
 # ── IB market-data helpers (optional) ────────────────────────────────
 
 def _try_connect_ib():
+    pass
 if _stopping:
 return None
 try:
