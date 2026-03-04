@@ -1,0 +1,30 @@
+TOP 5 HEADLINES (by news_points then recency)
+  1. [NBR    n2h=1 pts=1]  Is Nabors Industries (NBR) Still Attractive After A 95% One-Year Share Price Sur
+  2. [MSFT   n2h=0 pts=0]  Microsoft Shares Look More Attractive As AI Reverts To Tech Growth Norm? (NASDAQ
+  3. [AAPL   n2h=0 pts=0]  Apple (AAPL) Receives a Rating Update from a Top Analyst - The Globe and Mail
+  4. [AFL    n2h=0 pts=0]  Aflac (AFL) Margin Compression Challenges Bullish Earnings Narrative After FY 20
+  5. [QQQ    n2h=0 pts=0]  Popular QQQ ETF faces a crucial moment with Nvidia earnings on deck after its ra
+
+PLAYBOOK (OFF_HOURS) v6  [weighted: news×3 liq×2 vol×2 mom×1 sprd×1 rsi×1]
+#   sym     total  conf Q    nws liq vol mom spr rsi n2h    entry     stop    s%   qty    risk  headline
+--------------------------------------------------------------------------------------------------------------------------------------
+1   AMZN     13.0  0.48 HIGH   0   3   2   1   1   1   0    96.61    96.18  0.45   116   49.88  
+2   SPY      13.0  0.48 HIGH   0   3   2   0   1   2   0   523.39   521.30  0.40    23   48.07  
+3   QQQ      12.0  0.44 HIGH   0   3   1   2   1   1   0   411.93   409.87  0.50    24   49.44  Popular QQQ ETF faces a crucia…
+4   META     11.0  0.41 HIGH   0   3   2   0   1   0   0    96.75    96.36  0.40   128   49.92  
+5   TSLA     11.0  0.41 HIGH   0   3   1   2   1   0   0   101.45   100.94  0.50    98   49.98  
+6   GOOG     11.0  0.41 HIGH   0   3   2   0   1   0   0   103.36   102.87  0.47   102   49.98  
+7   AAPL     11.0  0.41 HIGH   0   3   1   1   1   1   0   194.83   193.95  0.45    56   49.28  Apple (AAPL) Receives a Rating…
+8   GOOGL    11.0  0.41 HIGH   0   3   1   2   1   0   0   101.98   101.47  0.50    98   49.98  
+9   NBR      10.0  0.37 MED    1   1   2   0   1   0   1   104.06   103.64  0.40   119   49.98  Is Nabors Industries (NBR) Sti…
+10  MSFT     10.0  0.37 HIGH   0   3   1   1   1   0   0   375.03   373.34  0.45    29   49.01  Microsoft Shares Look More Att…
+11  NVDA     10.0  0.37 HIGH   0   3   1   0   1   1   0   109.60   109.16  0.40   113   49.72  
+12  HUBS      9.0  0.33 LOW    0   0   2   3   1   1   0    94.59    93.98  0.64    81   49.41  
+13  OXY       9.0  0.33 LOW    0   0   2   2   1   2   0   100.37    99.87  0.50   100   50.00  
+14  TEAM      9.0  0.33 LOW    0   0   3   2   1   0   0    99.31    98.67  0.64    78   49.92  
+15  TME       9.0  0.33 LOW    0   0   2   2   1   2   0    97.88    97.36  0.53    96   49.92  
+16  AFL       9.0  0.33 LOW    0   0   2   3   1   1   0    95.97    95.44  0.55    94   49.82  Aflac (AFL) Margin Compression…
+17  FLR       9.0  0.33 LOW    0   0   2   2   1   2   0   101.72   101.21  0.50    98   49.98  Fluor (FLR) is a Great Momentu…
+18  WFC       9.0  0.33 LOW    0   0   2   3   1   1   0    99.29    98.74  0.55    90   49.50  
+19  IRM       9.0  0.33 LOW    0   0   2   3   1   1   0   104.55   103.97  0.55    86   49.88  
+20  SO        9.0  0.33 LOW    0   0   2   3   1   1   0    99.63    99.08  0.55    90   49.50  

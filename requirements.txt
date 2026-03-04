@@ -19,3 +19,4 @@ loguru
 # Set with: export FINNHUB_API_KEY='your_key'
 apscheduler
 apscheduler
+redis>=5.0

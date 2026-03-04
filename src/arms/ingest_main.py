@@ -1,12 +1,99 @@
+                                                                                                                        # --- Cluster-key consensus tracking ---
+                                                                                                            # --- Cluster-key consensus tracking ---
+                                                                                                # --- Cluster-key consensus tracking ---
+                                                                                    # --- Cluster-key consensus tracking ---
+                                                                        # --- Cluster-key consensus tracking ---
+                                                            # --- Cluster-key consensus tracking ---
+                                                # --- Cluster-key consensus tracking ---
+                                    # --- Cluster-key consensus tracking ---
+                        # --- Cluster-key consensus tracking ---
+            # --- Cluster-key consensus tracking ---
+# --- Cluster-key consensus helpers ---
+import re
+_STOPWORDS = set([
+    'the','a','an','and','or','but','if','in','on','at','to','for','of','by','with','as','is','are','was','were','be','been','has','had','have','from','that','this','it','its','he','she','they','them','his','her','their','will','would','can','could','should','may','might','do','does','did','so','such','not','no','yes','up','down','out','over','under','again','more','most','some','any','each','other','than','then','now','only','own','same','too','very','s','t','just','don','should','ll','d','re','ve','m','o'
+])
+def _extract_story_tokens(headline: str) -> tuple[str, ...]:
+    tokens = re.findall(r"\b\w+\b", headline.lower())
+    def _stem(w):
+        if w.endswith('ing') and len(w) > 4: return w[:-3]
+        if w.endswith('ed') and len(w) > 3: return w[:-2]
+        if w.endswith('s') and len(w) > 3: return w[:-1]
+        return w
+    return tuple(sorted(_stem(t) for t in tokens if t not in _STOPWORDS and len(t) > 2))
+def _primary_symbol(art):
+    if 'symbol' in art and art['symbol']:
+        return art['symbol']
+    rel = art.get('related', [])
+    if rel:
+        return rel[0]
+    return ''
+def _cluster_key(art):
+    ts = art.get('ts')
+    if hasattr(ts, 'timestamp'):
+        ts = ts.timestamp()
+    elif isinstance(ts, (int, float)):
+        pass
+    else:
+        ts = time.time()
+    bucket = int(ts // (15*60))
+    sym = _primary_symbol(art)
+    tokens = sorted(_extract_story_tokens(art.get('headline','')))[:3]
+    return f"{bucket}:{sym}:{','.join(tokens)}"
+
+import os
+import json
+import random
+import re
+import signal
+import threading
+import time
+import logging
+import requests
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Optional, Set, Tuple
+
+_NEWS_ENABLE_FINNHUB = os.environ.get("TL_NEWS_ENABLE_FINNHUB", "false").lower() in ("1", "true", "yes")
+_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+_BASE_SYMBOLS: list[str] = [
+    s.strip().upper()
+    for s in os.environ.get("BASE_SYMBOLS", ",".join(_SYMBOLS)).split(",")
+    if s.strip()
+]
+_NEWS_DEDUPE_WINDOW_S = float(os.environ.get("NEWS_DEDUPE_WINDOW_S", "3600"))
+_USE_IB = os.environ.get("TL_INGEST_USE_IB", "0").lower() in ("1", "true", "yes")
+_NEWS_PROVIDER = os.environ.get("NEWS_PROVIDER_PRIMARY", "benzinga").lower()
+_BENZINGA_NEWS_MAX_ITEMS = int(os.environ.get("BENZINGA_NEWS_MAX_ITEMS", "50"))
+_NEWS_DAYS = int(os.environ.get("TL_INGEST_NEWS_DAYS", "1"))
+_NEWS_PROVIDERS = [s.strip().lower() for s in os.environ.get("NEWS_PROVIDERS", "benzinga,gnews").split(",") if s.strip()]
+def _fetch_rss_news():
+    return [], "not_implemented"
+_NEWS_INTERVAL_S = float(os.environ.get("TL_INGEST_NEWS_INTERVAL_S", "20"))
+_NEWS_CANONICALIZE_GNEWS = os.environ.get("TL_NEWS_CANONICALIZE_GNEWS", "true").lower() in ("1", "true", "yes")
+_NEWS_CANONICALIZE_MAX_PER_POLL = int(os.environ.get("TL_NEWS_CANONICALIZE_MAX_PER_POLL", "10"))
+_NEWS_CANONICALIZE_TIMEOUT_S = float(os.environ.get("TL_NEWS_CANONICALIZE_TIMEOUT_S", "2.5"))
+_NEWS_CANONICALIZE_DEBUG = os.environ.get("TL_NEWS_CANONICALIZE_DEBUG", "false").lower() in ("1", "true", "yes")
+_NEWS_RESOLVE_REDIRECTS = os.environ.get("TL_NEWS_RESOLVE_REDIRECTS", "false").lower() in ("1", "true", "yes")
+_NEWS_RESOLVE_TIMEOUT_S = float(os.environ.get("TL_NEWS_RESOLVE_TIMEOUT_S", "2.0"))
+_NEWS_CONSENSUS_BOOST_ENABLED = os.environ.get("TL_NEWS_CONSENSUS_BOOST_ENABLED", "true").lower() in ("1", "true", "yes")
+_NEWS_CONSENSUS_BOOST = int(os.environ.get("TL_NEWS_CONSENSUS_BOOST", "2"))
+_NEWS_MAX_PUBLISHED_PER_POLL = int(os.environ.get("TL_NEWS_MAX_PUBLISHED_PER_POLL", "100"))
+_POLL_INTERVAL_S = float(os.environ.get("TL_INGEST_INTERVAL_S", "10"))
+
+
+
 """
 Ingest Arm — market-data and news ingestion.
 
 Responsibilities
 ----------------
 * Poll market data (via IB when connected, or stub prices) at a
-  configurable interval and publish **MarketSnapshot** messages.
+    configurable interval and publish **MarketSnapshot** messages.
 * Poll news (via Benzinga general-news endpoint) and publish
-  **NewsEvent** messages, deduplicating by *(symbol, headline)*.
+    **NewsEvent** messages, deduplicating by *(symbol, headline)*.
 * Emit periodic heartbeats so the monitor arm can track liveness.
 
 Configuration (env vars)
@@ -21,10 +108,8 @@ Configuration (env vars)
 
 Run::
 
-    python -m src.arms.ingest_main
+        python -m src.arms.ingest_main
 """
-
-from __future__ import annotations
 
 import json
 import os
@@ -33,6 +118,9 @@ import re
 import signal
 import threading
 import time
+import logging
+import requests
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,50 +138,7 @@ log = get_logger("ingest")
 
 # ── Tunables from environment ────────────────────────────────────────
 
-_SYMBOLS: list[str] = [
-    s.strip()
-    for s in os.environ.get("TL_INGEST_SYMBOLS", "SPY,QQQ,AAPL,MSFT,NVDA").split(",")
-    if s.strip()
-]
-_POLL_INTERVAL_S: float = float(os.environ.get("TL_INGEST_INTERVAL_S", "10"))
-_NEWS_INTERVAL_S: float = float(os.environ.get("TL_INGEST_NEWS_INTERVAL_S", "20"))
-_NEWS_DAYS: int = int(os.environ.get("TL_INGEST_NEWS_DAYS", "1"))
-_USE_IB: bool = os.environ.get("TL_INGEST_USE_IB", "0") in ("1", "true", "yes")
-
-# ── News provider ────────────────────────────────────────────────────
-# benzinga = Benzinga v2 general-news endpoint (default)
-# rss      = RSS only (no API calls)
-_NEWS_PROVIDER: str = os.environ.get("NEWS_PROVIDER_PRIMARY", "benzinga").lower()
-_BENZINGA_NEWS_MAX_ITEMS: int = int(os.environ.get("BENZINGA_NEWS_MAX_ITEMS", "100"))
-
-# ── Legend Phase 2: Multi-Provider News Config ───────────────────────
-_NEWS_PROVIDERS: list[str] = [
-    p.strip().lower()
-    for p in os.environ.get("TL_NEWS_PROVIDERS", "benzinga,rss").split(",")
-    if p.strip()
-]
-_NEWS_ENABLE_FINNHUB: bool = os.environ.get(
-    "TL_NEWS_ENABLE_FINNHUB", "false"
-).lower() in ("1", "true", "yes")
-_NEWS_DEDUPE_WINDOW_S: float = float(
-    os.environ.get("TL_NEWS_DEDUPE_WINDOW_S", "7200")
-)
-_NEWS_CONSENSUS_BOOST_ENABLED: bool = os.environ.get(
-    "TL_NEWS_CONSENSUS_BOOST_ENABLED", "true"
-).lower() in ("1", "true", "yes")
-_NEWS_CONSENSUS_BOOST: int = int(
-    os.environ.get("TL_NEWS_CONSENSUS_BOOST", "2")
-)
-_NEWS_MAX_PUBLISHED_PER_POLL: int = int(
-    os.environ.get("TL_NEWS_MAX_PUBLISHED_PER_POLL", "200")
-)
-
-# ── Universe expansion settings ──────────────────────────────────────
-_BASE_SYMBOLS: list[str] = [
-    s.strip().upper()
-    for s in os.environ.get("BASE_SYMBOLS", ",".join(_SYMBOLS)).split(",")
-    if s.strip()
-]
+## All legacy/duplicate helpers removed. Use the standardized helpers defined above.
 # Optional static liquid universe (merged into base at init)
 _LIQUID_UNIVERSE: list[str] = [
     s.strip().upper()
@@ -159,9 +204,74 @@ _NEWS_CONSENSUS_DEBUG: bool = os.environ.get(
 ).lower() in ("1", "true", "yes")
 
 # Story-level fingerprint → {ts, providers, tokens, bucket}
+# Story fingerprint cache (legacy, still used for some dedupe)
 _story_fp_cache: Dict[str, dict] = {}
 # Bucket index: bucket_int → list[fingerprint]  (for fuzzy scan)
 _story_bucket_index: Dict[int, list] = {}
+# --- Cluster-key consensus state ---
+_story_cluster_cache: Dict[str, dict] = {}  # cluster_key → {ts, providers, example, symbols}
+def _extract_canonical_domain(url: str) -> str:
+    try:
+        if not url:
+            return "unknown"
+        p = urlparse(url)
+        host = p.netloc.lower()
+        if host:
+            # Remove www.
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+    except Exception:
+        pass
+    return "unknown"
+
+def _publisher_hint_domain_from_headline(headline: str) -> str:
+    # Try to extract a publisher domain from the headline (very basic)
+    # e.g. "Reuters: ..." or "(Bloomberg) ..."
+    import re
+    m = re.match(r"([A-Za-z0-9\-\.]+)[:\)]", headline)
+    if m:
+        return m.group(1).lower()
+    return "unknown"
+
+def _compute_cluster_key(art: dict) -> str:
+    # bucket15m
+    bucket = str(_article_bucket(art))
+    # top_tokens(headline)
+    tokens = sorted(_extract_story_tokens(art.get("headline", "")))[:3]
+    # symbols
+    symbols = sorted(_article_symbols(art))
+    # canonical_domain
+    provider = art.get("_provider", "unknown")
+    url = art.get("url", "")
+    canonical_url = art.get("canonical_url", "")
+    headline = art.get("headline", "")
+    domain = "unknown"
+    if provider == "gnews":
+        domain = _extract_canonical_domain(canonical_url or url)
+    elif provider == "benzinga":
+        domain = _extract_canonical_domain(url)
+        if not domain or domain == "unknown" or domain == "benzinga.com":
+            # Try to get a publisher hint from headline
+            hint = _publisher_hint_domain_from_headline(headline)
+            if hint != "unknown":
+                domain = hint
+        if not domain:
+            domain = "benzinga.com"
+    else:
+        domain = _extract_canonical_domain(url)
+    if not domain:
+        domain = "unknown"
+    # Compose key
+    key_str = bucket + "|" + ",".join(tokens) + "|" + ",".join(symbols) + "|" + domain
+    return _hashlib.md5(key_str.encode("utf-8")).hexdigest()
+
+def _prune_story_cluster_cache():
+    now = time.time()
+    cutoff = now - _NEWS_DEDUPE_WINDOW_S
+    expired = [k for k, v in _story_cluster_cache.items() if v["ts"] < cutoff]
+    for k in expired:
+        del _story_cluster_cache[k]
 # Per-(symbol, fingerprint) publish-dedupe
 _mp_dedupe_cache: Dict[Tuple[str, str], dict] = {}  # (symbol, fp) → {ts, providers}
 _MP_DEDUPE_MAX = 100_000
@@ -174,6 +284,161 @@ _URL_STRIP_PARAMS = frozenset({
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
     "fbclid", "gclid", "msclkid", "ref", "source", "si",
 })
+
+
+# --- Standardized helpers ---
+def _canonicalize_url(url: str) -> str:
+    """Strips tracking params and normalizes to scheme://netloc/path. Never raises."""
+    try:
+        p = urlparse(url)
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return f"{p.scheme}://{netloc}{p.path}" if netloc else url
+    except Exception:
+        return url
+
+def _resolve_redirect_url(url: str, timeout_s: float) -> str | None:
+    """HEAD allow_redirects=True, fallback GET. Never raises."""
+    import requests
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=timeout_s, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=timeout_s, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    return None
+
+def _extract_domain(url: str) -> str:
+    """Lower netloc, strip leading www., return 'unknown' if invalid."""
+    try:
+        p = urlparse(url)
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc if netloc else "unknown"
+    except Exception:
+        return "unknown"
+
+# --- Minimal local RSS fetcher for gnews ---
+import xml.etree.ElementTree as ET
+def _fetch_rss_urls(urls: list[str], timeout_s: float = 5.0, max_items_total: int = 30) -> tuple[list[dict], str]:
+    import requests, time
+    items = []
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=timeout_s)
+            if resp.status_code != 200:
+                return [], f"http_{resp.status_code}"
+            root = ET.fromstring(resp.content)
+            for item in root.findall('.//item'):
+                title = item.findtext('title') or ''
+                link = item.findtext('link') or ''
+                pubdate = item.findtext('pubDate') or ''
+                # Try to parse pubDate to epoch seconds
+                ts = time.time()
+                try:
+                    import email.utils
+                    dt = email.utils.parsedate_to_datetime(pubdate)
+                    ts = dt.timestamp()
+                except Exception:
+                    pass
+                items.append({
+                    "headline": title,
+                    "url": link,
+                    "ts": ts,
+                    "_provider": "gnews",
+                })
+                if len(items) >= max_items_total:
+                    return items, "ok"
+        except Exception as exc:
+            return [], f"rss_parse_error:{exc}"
+    return items, "ok"
+
+# --- Google News Canonicalization Helpers ---
+def _is_gnews_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        u = url.lower()
+        if "news.google.com" in u:
+            return True
+        if u.startswith("https://www.google.com/url") or u.startswith("http://www.google.com/url"):
+            return True
+        return False
+    except Exception:
+        return False
+
+def _strip_tracking_params(url: str) -> str:
+    try:
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        p = urlparse(url)
+        qs = parse_qs(p.query, keep_blank_values=False)
+        clean_qs = {k: v for k, v in qs.items() if not (k.lower().startswith("utm_") or k.lower() in ("gclid", "fbclid", "msclkid", "ref", "source", "si"))}
+        query = urlencode(clean_qs, doseq=True) if clean_qs else ""
+        return urlunparse((p.scheme, p.netloc, p.path, '', query, ''))
+    except Exception:
+        return url
+
+def _resolve_redirect_url(url: str, timeout_s: float) -> str | None:
+    import requests
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=timeout_s, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=timeout_s, stream=True, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    return None
+
+def _canonicalize_url(url: str) -> str:
+    return _strip_tracking_params(url)
+
+# ── Google News Canonicalization Helpers ──
+def _is_gnews_url(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+        return host.endswith("news.google.com")
+    except Exception:
+        return False
+
+def _canonicalize_url(url: str) -> str:
+    try:
+        p = urlparse(url)
+        qs = parse_qs(p.query, keep_blank_values=False)
+        clean_qs = {k: v for k, v in qs.items() if not (k.lower().startswith("utm_") or k.lower() in ("gclid", "fbclid"))}
+        query = urlencode(clean_qs, doseq=True) if clean_qs else ""
+        return urlunparse((p.scheme, p.netloc.lower(), p.path.rstrip('/'), '', query, ''))
+    except Exception:
+        return url.split("?")[0].rstrip("/").lower()
+
+def _resolve_redirect_url(url: str, timeout_s: float) -> str:
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=timeout_s)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=timeout_s)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    return url
 
 # Built-in stopwords for headline token extraction (kept small)
 _STOPWORDS = frozenset({
@@ -472,60 +737,100 @@ def _fetch_finnhub_news() -> tuple[list[dict], str]:
 
 
 def _fetch_multi_provider_news() -> dict[str, list[dict]]:
-    """Fetch from all enabled providers. Returns {provider: [articles]}.
-
-    Each article dict has:
-      headline, source, url, ts, related_tickers, summary, _primary_symbol
-    Errors in any single provider are isolated — others still return.
+    """
+    Fetch from all enabled providers.
+    Returns: {provider: [article_dict, ...]}
     """
     results: dict[str, list[dict]] = {}
-
-    for prov in _NEWS_PROVIDERS:
-        if _stopping:
-            break
-
-        if prov == "benzinga":
-            items, reason = _fetch_news_with_timeout()
-            if items:
+    log.info("news_providers_active=%s", _NEWS_PROVIDERS)
+    for provider in _NEWS_PROVIDERS:
+        try:
+            # Ensure normalization cannot remap 'gnews'
+            prov = provider.strip().lower()
+            if prov == "gnews":
+                items, reason = _fetch_gnews_news()
+                log.info("provider=gnews fetched=%d reason=%s", len(items), reason)
+                results["gnews"] = items
+            elif prov == "benzinga":
+                items, reason = _fetch_benzinga_news()
+                log.info("provider=benzinga fetched=%d reason=%s", len(items), reason)
                 results["benzinga"] = items
-            elif reason:
-                log.debug("benzinga skip: %s", reason)
-
-        elif prov == "rss":
-            rss_syms = _get_universe_list()[:10] or list(_BASE_SYMBOLS)
-            items = _fetch_rss_fallback(rss_syms)
-            if items:
+            elif prov == "rss":
+                items, reason = _fetch_rss_news()
+                log.info("provider=rss fetched=%d reason=%s", len(items), reason)
                 results["rss"] = items
-
-        # finnhub is NOT in _NEWS_PROVIDERS list — gated separately
-        else:
-            log.debug("Unknown news provider '%s' — skipping", prov)
-
-    # Finnhub tertiary: only if explicitly enabled via its own flag
-    if _NEWS_ENABLE_FINNHUB and not _stopping:
-        items, reason = _fetch_finnhub_news()
-        if items:
-            results["finnhub"] = items
-        elif reason:
-            log.debug("finnhub skip: %s", reason)
-
+        except Exception as exc:
+            log.warning("provider=%s error=%s", provider, exc)
+            results[provider] = []
+    # Google News Redirect Resolution is handled in the main ingest loop, not here.
     return results
+# --- GNews URL helpers ---
+def _is_gnews_url(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+        return "news.google.com" in host or host == "news.google.com"
+    except Exception:
+        return False
+
+def _resolve_redirect_url(url: str, timeout_s: float) -> tuple[str|None, str]:
+    import requests
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=timeout_s, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=timeout_s, headers=headers)
+        if resp.url and resp.url != url:
+            return resp.url
+    except Exception:
+        pass
+    return url
+# --- GNews fetcher ---
+def _fetch_gnews_news() -> tuple[list[dict], str]:
+    if _stopping:
+        return [], "stopping"
+    url = "https://news.google.com/rss/search?q=stock%20market&hl=en-US&gl=US&ceid=US:en"
+    try:
+        import requests, time
+        import xml.etree.ElementTree as ET
+        resp = requests.get(url, timeout=5.0)
+        if resp.status_code != 200:
+            return [], f"http_{resp.status_code}"
+        root = ET.fromstring(resp.content)
+        items = []
+        for item in root.findall('.//item'):
+            title = item.findtext('title') or ''
+            link = item.findtext('link') or ''
+            pubdate = item.findtext('pubDate') or ''
+            ts = time.time()
+            try:
+                import email.utils
+                dt = email.utils.parsedate_to_datetime(pubdate)
+                ts = dt.timestamp()
+            except Exception:
+                pass
+            items.append({
+                "headline": title,
+                "url": link,
+                "ts": ts,
+                "provider": "gnews",
+                "related_tickers": [],
+            })
+            if len(items) >= 30:
+                break
+        if items:
+            return items, "ok"
+        else:
+            return [], "no_items"
+    except Exception as exc:
+        return [], f"error:{exc}"
 
 
 def _normalise_url(url: str) -> str:
-    """Strip tracking query params and normalise scheme+host+path."""
-    if not url:
-        return ""
-    try:
-        p = urlparse(url)
-        # Keep only non-tracking query params
-        qs = parse_qs(p.query, keep_blank_values=False)
-        clean_qs = {k: v for k, v in qs.items() if k.lower() not in _URL_STRIP_PARAMS}
-        # Rebuild with sorted params for determinism
-        query = urlencode(clean_qs, doseq=True) if clean_qs else ""
-        return f"{p.scheme}://{p.netloc.lower()}{p.path.rstrip('/')}"
-    except Exception:
-        return url.split("?")[0].rstrip("/").lower()
+    return _canonicalize_url(url)
 
 
 # ── Story token extraction (for Tier B + C) ─────────────────────────
@@ -623,28 +928,23 @@ def _story_fingerprint(article: dict) -> str:
     sym_list = _article_symbols(article)
     bucket = _article_bucket(article)
 
-    # ── Tier A: URL-based ────────────────────────────────────────────
-    url = (article.get("url") or "").strip()
+    # ── Tier A: Canonical URL-based ──
+    url = (article.get("canonical_url") or article.get("url") or "").strip()
     if url:
-        norm_url = _normalise_url(url)
+        norm_url = _canonicalize_url(url)
         if norm_url:
             fp_url = _hashlib.md5(
                 norm_url.encode(), usedforsecurity=False
             ).hexdigest()[:20]
-            # Check if this URL-fp already exists
             if fp_url in _story_fp_cache:
-                # Attach tokens/bucket if first time seeing them
                 entry = _story_fp_cache[fp_url]
                 if not entry.get("tokens"):
                     entry["tokens"] = token_set
                     entry["bucket"] = bucket
                 return fp_url
-            # Before creating a new URL-fp, try fuzzy against existing
-            # (the other provider may have used a different URL)
             fuzzy_fp = _fuzzy_find_fp(token_set, bucket, headline) if token_set else None
             if fuzzy_fp:
                 return fuzzy_fp
-            # New story via URL
             return fp_url
 
     # ── Tier B: token-signature hash ─────────────────────────────────
@@ -1161,6 +1461,34 @@ def main() -> None:
 
             fetched = len(raw_articles)
 
+            # ── Google News Canonicalization (OPTION B) ──
+            gnews_resolved_ok = 0
+            gnews_resolved_fail = 0
+            gnews_skipped_limit = 0
+            gnews_canon_count = 0
+            canonized_this_poll = 0
+            for art in raw_articles:
+                url = art.get("url")
+                if not url:
+                    continue
+                if _is_gnews_url(url) and _NEWS_CANONICALIZE_GNEWS:
+                    if canonized_this_poll >= _NEWS_CANONICALIZE_MAX_PER_POLL:
+                        gnews_skipped_limit += 1
+                        continue
+                    resolved = _resolve_redirect_url(url, _NEWS_CANONICALIZE_TIMEOUT_S)
+                    if resolved and resolved != url:
+                        art["canonical_url"] = _canonicalize_url(resolved)
+                        gnews_resolved_ok += 1
+                    else:
+                        art["canonical_url"] = _canonicalize_url(url)
+                        gnews_resolved_fail += 1
+                    canonized_this_poll += 1
+                else:
+                    art["canonical_url"] = _canonicalize_url(url)
+                    gnews_canon_count += 1
+            if _NEWS_CANONICALIZE_DEBUG:
+                log.info(f"GNews canonicalization: resolved_ok={gnews_resolved_ok} resolved_fail={gnews_resolved_fail} skipped_limit={gnews_skipped_limit} canon_non_gnews={gnews_canon_count}")
+
             # ── Universe expansion from news ─────────────────────────
             expansion_articles: list[dict] = []
             for art in raw_articles:
@@ -1228,44 +1556,100 @@ def main() -> None:
             in_universe = len(filtered)
 
             # ── Legend Phase 2.2: Cross-provider dedupe + consensus ────
-            # Compute story fingerprints + token sets for each fanout article
+
+
+            # --- Compute cluster key and canonical_url for each article ---
             for art in filtered:
                 art["_fp"] = _story_fingerprint(art)
                 art["_tokens"] = _extract_story_tokens(art.get("headline", ""))
                 art["_bucket"] = _article_bucket(art)
+                # GNews canonical_url resolution
+                if art.get("_provider") == "gnews" and _NEWS_RESOLVE_REDIRECTS:
+                    if "canonical_url" not in art or not art["canonical_url"]:
+                        orig_url = art.get("url", "")
+                        resolved = _resolve_redirect_url(orig_url, _NEWS_RESOLVE_TIMEOUT_S)
+                        if resolved:
+                            art["canonical_url"] = resolved
+                        else:
+                            art["canonical_url"] = orig_url
+                # Compute cluster key
+                bucket = str(art["_bucket"])
+                symbols = sorted(_article_symbols(art))
+                tokens = sorted(list(_extract_story_tokens(art.get("headline", ""))))[:8]
+                canonical_domain = _extract_domain(art.get("canonical_url") or art.get("url") or "")
+                cluster_key = f"{bucket}|{canonical_domain}|{','.join(symbols)}|{','.join(tokens)}"
+                art["_cluster_key"] = cluster_key
+
 
             dupes_dropped = 0
             consensus_hits = 0
+            story_fp_consensus = 0
             consensus_examples: list[str] = []   # for log
+
+            # --- Story-level consensus tracking ---
+            _prune_story_cluster_cache()
+            story_fp_cache: dict = {}
+            story_fp_total = 0
+            story_fp_consensus = 0
+            consensus_hits = 0
+            consensus_examples: list[str] = []
             to_publish: list[dict] = []
+            # Track fp->providers for this poll
+            fp_providers: dict[str, set] = {}
+            for art in filtered:
+                sym = art["symbol"]
+                hl = art["headline"]
+                prov = art.get("_provider", _NEWS_PROVIDER)
+                # Compute story_fp using canonical_url if present
+                url = (art.get("canonical_url") or art.get("url") or "").strip()
+                if url:
+                    norm_url = _canonicalize_url(url)
+                    fp = _hashlib.md5(norm_url.encode(), usedforsecurity=False).hexdigest()[:20]
+                else:
+                    tokens = sorted(_extract_story_tokens(hl))
+                    syms = sorted(_article_symbols(art))
+                    bucket = str(_article_bucket(art))
+                    raw = f"{','.join(syms)}|{','.join(tokens)}|{bucket}"
+                    fp = _hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:20]
+                art["_story_fp"] = fp
+                # Register provider in story_fp_cache
+                providers = fp_providers.setdefault(fp, set())
+                providers.add(prov)
+            story_fp_total = len(fp_providers)
+            story_fp_consensus = sum(1 for v in fp_providers.values() if len(v) >= 2)
+
+            if _NEWS_CONSENSUS_DEBUG:
+                # show a few fingerprints and their provider sets
+                examples = []
+                for fp, provs in list(fp_providers.items())[:10]:
+                    examples.append(f"{fp[:8]}:{','.join(sorted(provs))}")
+                log.info("fp_provider_sets_sample=%s", " | ".join(examples))
 
             for art in filtered:
                 sym = art["symbol"]
                 hl = art["headline"]
                 prov = art.get("_provider", _NEWS_PROVIDER)
-                fp = art["_fp"]
-
+                fp = art["_story_fp"]
+                provider_count = len(fp_providers[fp])
+                art["_story_fp_provider_count"] = provider_count
+                # Per-(symbol, fingerprint) publish dedupe (legacy, still needed)
                 is_new, story_n = _mp_dedupe_check(
                     sym, fp, prov,
                     token_set=art.get("_tokens"),
                     bucket=art.get("_bucket"),
                 )
-
                 if not is_new:
                     dupes_dropped += 1
-                    if story_n >= 2:
-                        consensus_hits += 1
                     continue
-
-                # Legacy single-provider dedupe
                 if not _is_new_news(sym, hl):
                     dupes_dropped += 1
                     continue
-
-                # Attach story-level provider count for consensus tagging
                 art["_story_n"] = story_n
                 to_publish.append(art)
-
+                if provider_count >= 2:
+                    consensus_hits += 1
+                    if len(consensus_examples) < 5:
+                        consensus_examples.append(f"{sym}({provider_count}p)")
             to_publish = to_publish[:_NEWS_MAX_PUBLISHED_PER_POLL]
 
             # ── News Category Classification (Legend Phase 1) ────────
@@ -1276,6 +1660,8 @@ def main() -> None:
 
             published = 0
             _cat_counts: dict[str, int] = {}
+
+
             for art in to_publish:
                 ts_kwarg = {}
                 if art.get("ts") and hasattr(art["ts"], "isoformat"):
@@ -1293,28 +1679,21 @@ def main() -> None:
                     impact_score = min(10, int(base * mult))
                     _cat_counts[cat] = _cat_counts.get(cat, 0) + 1
 
-                # ── Consensus boost (Legend Phase 2) ─────────────────
-                fp = art.get("_fp", "")
-                n_consensus = _story_consensus_count(fp) if fp else 1
-                if _NEWS_CONSENSUS_BOOST_ENABLED and n_consensus >= 2:
-                    boost = min(6, (n_consensus - 1) * _NEWS_CONSENSUS_BOOST)
+                # --- Story-fp/Cluster-key consensus tagging ---
+                provider_count = art.get("_story_fp_provider_count", 1)
+                ckey = _cluster_key(art)
+                cluster_count = len(cluster_providers.get(ckey, set()))
+                consensus_count = 0
+                if provider_count >= 2:
+                    consensus_count = provider_count
+                elif cluster_count >= 2:
+                    consensus_count = cluster_count
+                if consensus_count >= 2:
+                    impact_tags.append(f"CONSENSUS:{consensus_count}")
+                    cluster_hits += 1 if consensus_count == cluster_count else 0
+                if _NEWS_CONSENSUS_BOOST_ENABLED and consensus_count >= 2:
+                    boost = min(6, (consensus_count - 1) * _NEWS_CONSENSUS_BOOST)
                     impact_score = min(10, impact_score + boost)
-                    impact_tags.append(f"CONSENSUS:{n_consensus}")
-                    if len(consensus_examples) < 3:
-                        consensus_examples.append(
-                            f"{art['symbol']}({n_consensus}p)"
-                        )
-                elif art.get("_story_n", 1) >= 2:
-                    # Provider count grew after initial publish
-                    n2 = art["_story_n"]
-                    impact_tags.append(f"CONSENSUS:{n2}")
-                    if _NEWS_CONSENSUS_BOOST_ENABLED:
-                        boost = min(6, (n2 - 1) * _NEWS_CONSENSUS_BOOST)
-                        impact_score = min(10, impact_score + boost)
-                    if len(consensus_examples) < 3:
-                        consensus_examples.append(f"{art['symbol']}({n2}p)")
-                    consensus_hits += 1
-
                 event = NewsEvent(
                     symbol=art["symbol"],
                     headline=headline,
@@ -1329,18 +1708,38 @@ def main() -> None:
                 bus.publish(NEWS_EVENT, event)
                 published += 1
 
+
+
+
             prov_str = " ".join(f"{k}={v}" for k, v in sorted(provider_counts.items())) if provider_counts else "none"
             cat_str = " ".join(f"{k}={v}" for k, v in sorted(_cat_counts.items())) if _cat_counts else "none"
             consensus_str = " ".join(consensus_examples) if consensus_examples else ""
+            cluster_str = " ".join(cluster_ex) if cluster_ex else ""
             log.info(
                 "News poll: providers=[%s]  fetched=%d  fanout=%d  avg_related=%.1f  "
-                "unique_syms=%d  in_universe=%d  dupes_dropped=%d  consensus_hits=%d  "
-                "published=%d  (cap=%d)  categories=[%s]%s",
+                "unique_syms=%d  in_universe=%d  dupes_dropped=%d  published=%d  "
+                "story_fp_total=%d  story_fp_consensus=%d  consensus_hits=%d  (cap=%d)  categories=[%s]%s  "
+                "cluster_total=%d  cluster_consensus=%d  cluster_hits=%d%s",
                 prov_str, fetched, fanout_total, avg_related,
-                len(unique_fanout_syms), in_universe, dupes_dropped, consensus_hits,
-                published, _NEWS_MAX_PUBLISHED_PER_POLL, cat_str,
+                len(unique_fanout_syms), in_universe, dupes_dropped, published,
+                story_fp_total, story_fp_consensus, consensus_hits, _NEWS_MAX_PUBLISHED_PER_POLL, cat_str,
                 f"  consensus_ex=[{consensus_str}]" if consensus_str else "",
+                cluster_total, cluster_consensus, cluster_hits,
+                f"  cluster_ex=[{cluster_str}]" if cluster_str else "",
             )
+
+            # --- Consensus debug logging ---
+            if _NEWS_CONSENSUS_DEBUG:
+                # Provider domains breakdown for each provider
+                for prov, items in provider_results.items():
+                    domain_counts = {}
+                    for art in items:
+                        dom = _extract_canonical_domain(art.get("canonical_url") or art.get("url"))
+                        domain_counts[dom] = domain_counts.get(dom, 0) + 1
+                    log.info(f"provider_domains[{prov}]: %s", " ".join(f"{k}={v}" for k, v in sorted(domain_counts.items())))
+                # Story-fp consensus detail
+                n_consensus = sum(1 for v in fp_providers.values() if len(v) >= 2)
+                log.info(f"story_fp_consensus_detail: {n_consensus} fps with 2+ providers")
 
         # ── Universe maintenance ─────────────────────────────────────
         if _running and now - _last_universe_refresh_ts >= _UNIVERSE_REFRESH_S:

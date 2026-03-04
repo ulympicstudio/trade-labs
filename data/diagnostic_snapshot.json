@@ -1,0 +1,524 @@
+{
+  "ts": "2026-03-01T01:17:01.423566+00:00",
+  "session": "OFF_HOURS",
+  "universe_overview": {
+    "universe_size": 330,
+    "symbols_polled_last_cycle": 40,
+    "count_with_rsi_available": 330,
+    "count_with_news_last_2h": 9,
+    "news_cache_unique_symbols": 9,
+    "news_cache_total_events": 779,
+    "news_cache_ts_is_datetime": 779,
+    "count_passing_liquidity_filter": 10,
+    "pct_from_liquid": 3.0,
+    "count_on_board_gated": 330,
+    "count_scored_total_gte_10": 14,
+    "max_weighted_total": 27.0,
+    "avg_vol_pct": 0.1295,
+    "v5_hard_pool": 329,
+    "v5_relaxed_count": 6,
+    "v5_strict_count": 10,
+    "v5_published": 18,
+    "v5_min_news_unmet": true,
+    "v5_quality_dist": {
+      "HIGH": 8,
+      "MED": 6,
+      "LOW": 4
+    },
+    "v5_published_news_dist": {
+      "2": 1,
+      "0": 15,
+      "1": 2
+    },
+    "top10_by_news_count_2h": [
+      {
+        "symbol": "MSFT",
+        "news_count_2h": 3
+      },
+      {
+        "symbol": "BMY",
+        "news_count_2h": 2
+      },
+      {
+        "symbol": "AAPL",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "C",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "AMZN",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "AVGO",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "AXP",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "AI",
+        "news_count_2h": 1
+      },
+      {
+        "symbol": "IRS",
+        "news_count_2h": 1
+      }
+    ]
+  },
+  "score_distribution": {
+    "histogram": {
+      "0": 0,
+      "1": 1,
+      "2": 3,
+      "3": 36,
+      "4": 58,
+      "5": 87,
+      "6": 53,
+      "7": 49,
+      "8": 25,
+      "9": 4,
+      "10": 4,
+      "11": 7,
+      "12": 1,
+      "13": 1,
+      "14": 0,
+      "15": 0,
+      "16": 0,
+      "17": 0,
+      "18": 1,
+      "19": 0,
+      "20": 0,
+      "21": 0,
+      "22": 0,
+      "23": 0,
+      "24": 0,
+      "25": 0,
+      "26": 0,
+      "27": 0
+    },
+    "top10_by_news": [
+      {
+        "symbol": "MSFT",
+        "value": 2.0
+      },
+      {
+        "symbol": "BMY",
+        "value": 1.0
+      },
+      {
+        "symbol": "C",
+        "value": 1.0
+      },
+      {
+        "symbol": "SPY",
+        "value": 0.0
+      },
+      {
+        "symbol": "QQQ",
+        "value": 0.0
+      },
+      {
+        "symbol": "AAPL",
+        "value": 0.0
+      },
+      {
+        "symbol": "NVDA",
+        "value": 0.0
+      },
+      {
+        "symbol": "BKR",
+        "value": 0.0
+      },
+      {
+        "symbol": "BLK",
+        "value": 0.0
+      },
+      {
+        "symbol": "BSX",
+        "value": 0.0
+      }
+    ],
+    "top10_by_momentum": [
+      {
+        "symbol": "BSX",
+        "value": 3.0
+      },
+      {
+        "symbol": "CARR",
+        "value": 3.0
+      },
+      {
+        "symbol": "CB",
+        "value": 3.0
+      },
+      {
+        "symbol": "CMG",
+        "value": 3.0
+      },
+      {
+        "symbol": "COF",
+        "value": 3.0
+      },
+      {
+        "symbol": "COIN",
+        "value": 3.0
+      },
+      {
+        "symbol": "COP",
+        "value": 3.0
+      },
+      {
+        "symbol": "COST",
+        "value": 3.0
+      },
+      {
+        "symbol": "EQR",
+        "value": 3.0
+      },
+      {
+        "symbol": "ETSY",
+        "value": 3.0
+      }
+    ],
+    "top10_by_volatility": [
+      {
+        "symbol": "CB",
+        "value": 3.0
+      },
+      {
+        "symbol": "CI",
+        "value": 3.0
+      },
+      {
+        "symbol": "ES",
+        "value": 3.0
+      },
+      {
+        "symbol": "MSFT",
+        "value": 2.0
+      },
+      {
+        "symbol": "BMY",
+        "value": 2.0
+      },
+      {
+        "symbol": "BSX",
+        "value": 2.0
+      },
+      {
+        "symbol": "C",
+        "value": 2.0
+      },
+      {
+        "symbol": "CARR",
+        "value": 2.0
+      },
+      {
+        "symbol": "CF",
+        "value": 2.0
+      },
+      {
+        "symbol": "CHTR",
+        "value": 2.0
+      }
+    ],
+    "top10_by_vol_pct": [
+      {
+        "symbol": "ES",
+        "value": 0.27
+      },
+      {
+        "symbol": "CI",
+        "value": 0.26
+      },
+      {
+        "symbol": "CB",
+        "value": 0.26
+      },
+      {
+        "symbol": "UNP",
+        "value": 0.25
+      },
+      {
+        "symbol": "FCX",
+        "value": 0.24
+      },
+      {
+        "symbol": "AFL",
+        "value": 0.24
+      },
+      {
+        "symbol": "BAC",
+        "value": 0.23
+      },
+      {
+        "symbol": "CMCSA",
+        "value": 0.23
+      },
+      {
+        "symbol": "TME",
+        "value": 0.23
+      },
+      {
+        "symbol": "EW",
+        "value": 0.23
+      }
+    ],
+    "top10_by_liquidity": [
+      {
+        "symbol": "SPY",
+        "value": 3.0
+      },
+      {
+        "symbol": "QQQ",
+        "value": 3.0
+      },
+      {
+        "symbol": "AAPL",
+        "value": 3.0
+      },
+      {
+        "symbol": "MSFT",
+        "value": 3.0
+      },
+      {
+        "symbol": "NVDA",
+        "value": 3.0
+      },
+      {
+        "symbol": "GOOG",
+        "value": 3.0
+      },
+      {
+        "symbol": "GOOGL",
+        "value": 3.0
+      },
+      {
+        "symbol": "META",
+        "value": 3.0
+      },
+      {
+        "symbol": "TSLA",
+        "value": 3.0
+      },
+      {
+        "symbol": "AMZN",
+        "value": 3.0
+      }
+    ]
+  },
+  "correlation_snapshot": {
+    "symbols": [
+      "MSFT",
+      "GOOGL",
+      "BMY",
+      "QQQ",
+      "AAPL",
+      "C",
+      "GOOG",
+      "TSLA",
+      "AMZN",
+      "AXP"
+    ],
+    "matrix": {
+      "MSFT": {
+        "MSFT": 1.0,
+        "GOOGL": -0.54,
+        "BMY": 0.257,
+        "QQQ": 0.645,
+        "AAPL": -0.517,
+        "C": -0.774,
+        "GOOG": 0.56,
+        "TSLA": -0.481,
+        "AMZN": -0.539,
+        "AXP": -0.74
+      },
+      "GOOGL": {
+        "MSFT": -0.54,
+        "GOOGL": 1.0,
+        "BMY": -0.22,
+        "QQQ": -0.545,
+        "AAPL": 0.251,
+        "C": 0.822,
+        "GOOG": -0.16,
+        "TSLA": 0.69,
+        "AMZN": 0.669,
+        "AXP": 0.561
+      },
+      "BMY": {
+        "MSFT": 0.257,
+        "GOOGL": -0.22,
+        "BMY": 1.0,
+        "QQQ": 0.098,
+        "AAPL": 0.167,
+        "C": -0.293,
+        "GOOG": -0.147,
+        "TSLA": -0.673,
+        "AMZN": -0.388,
+        "AXP": 0.06
+      },
+      "QQQ": {
+        "MSFT": 0.645,
+        "GOOGL": -0.545,
+        "BMY": 0.098,
+        "QQQ": 1.0,
+        "AAPL": -0.671,
+        "C": -0.808,
+        "GOOG": 0.662,
+        "TSLA": -0.426,
+        "AMZN": -0.613,
+        "AXP": -0.782
+      },
+      "AAPL": {
+        "MSFT": -0.517,
+        "GOOGL": 0.251,
+        "BMY": 0.167,
+        "QQQ": -0.671,
+        "AAPL": 1.0,
+        "C": 0.52,
+        "GOOG": -0.897,
+        "TSLA": 0.007,
+        "AMZN": 0.579,
+        "AXP": 0.835
+      },
+      "C": {
+        "MSFT": -0.774,
+        "GOOGL": 0.822,
+        "BMY": -0.293,
+        "QQQ": -0.808,
+        "AAPL": 0.52,
+        "C": 1.0,
+        "GOOG": -0.517,
+        "TSLA": 0.673,
+        "AMZN": 0.677,
+        "AXP": 0.769
+      },
+      "GOOG": {
+        "MSFT": 0.56,
+        "GOOGL": -0.16,
+        "BMY": -0.147,
+        "QQQ": 0.662,
+        "AAPL": -0.897,
+        "C": -0.517,
+        "GOOG": 1.0,
+        "TSLA": -0.091,
+        "AMZN": -0.398,
+        "AXP": -0.868
+      },
+      "TSLA": {
+        "MSFT": -0.481,
+        "GOOGL": 0.69,
+        "BMY": -0.673,
+        "QQQ": -0.426,
+        "AAPL": 0.007,
+        "C": 0.673,
+        "GOOG": -0.091,
+        "TSLA": 1.0,
+        "AMZN": 0.411,
+        "AXP": 0.38
+      },
+      "AMZN": {
+        "MSFT": -0.539,
+        "GOOGL": 0.669,
+        "BMY": -0.388,
+        "QQQ": -0.613,
+        "AAPL": 0.579,
+        "C": 0.677,
+        "GOOG": -0.398,
+        "TSLA": 0.411,
+        "AMZN": 1.0,
+        "AXP": 0.588
+      },
+      "AXP": {
+        "MSFT": -0.74,
+        "GOOGL": 0.561,
+        "BMY": 0.06,
+        "QQQ": -0.782,
+        "AAPL": 0.835,
+        "C": 0.769,
+        "GOOG": -0.868,
+        "TSLA": 0.38,
+        "AMZN": 0.588,
+        "AXP": 1.0
+      }
+    },
+    "high_corr_count": 0,
+    "high_corr_pairs": [],
+    "warning": false
+  },
+  "draft_quality": {
+    "total_drafts": 330,
+    "pct_from_liquid_symbols": 3.0,
+    "average_confidence": 0.206,
+    "average_stop_distance_pct": 0.5
+  },
+  "news_influence": [
+    {
+      "symbol": "MSFT",
+      "news_count_2h": 3,
+      "total_score": 18.0,
+      "confidence": 0.667,
+      "entry": 506.64,
+      "stop": 504.11
+    },
+    {
+      "symbol": "BMY",
+      "news_count_2h": 2,
+      "total_score": 12.0,
+      "confidence": 0.444,
+      "entry": 88.07,
+      "stop": 87.63
+    },
+    {
+      "symbol": "AAPL",
+      "news_count_2h": 1,
+      "total_score": 11.0,
+      "confidence": 0.407,
+      "entry": 190.08,
+      "stop": 189.13
+    },
+    {
+      "symbol": "C",
+      "news_count_2h": 1,
+      "total_score": 11.0,
+      "confidence": 0.407,
+      "entry": 97.34,
+      "stop": 96.85
+    },
+    {
+      "symbol": "CDNS",
+      "news_count_2h": 1,
+      "total_score": 6.0,
+      "confidence": 0.222,
+      "entry": 99.4,
+      "stop": 98.9
+    }
+  ],
+  "v6_funnel": {
+    "hard_pool_size": 329,
+    "topN_considered": 100,
+    "relaxed_count": 6,
+    "strict_count": 10,
+    "published_count": 18,
+    "min_news_unmet": true,
+    "quality_dist": {
+      "HIGH": 8,
+      "MED": 6,
+      "LOW": 4
+    },
+    "news_points_distribution": {
+      "2": 1,
+      "0": 15,
+      "1": 2
+    },
+    "published_with_news_gte2": 1,
+    "min_news_quota": 5,
+    "v6_skipped_family": 2,
+    "v6_skipped_etf": 2,
+    "v6_skipped_corr": 2
+  }
+}
