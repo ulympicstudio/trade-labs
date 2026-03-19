@@ -60,6 +60,11 @@ class LocalBus:
         self._queue: queue.Queue[Any] = queue.Queue()
         self._closed = False
 
+        # Diagnostic counters (thread-safe via GIL for simple int ops)
+        self._pub_counts: Dict[str, int] = {}
+        self._dispatch_counts: Dict[str, int] = {}
+        self._drop_counts: Dict[str, int] = {}  # published but no handler
+
         # Start the single dispatcher thread
         self._dispatcher = threading.Thread(
             target=self._dispatch_loop,
@@ -94,6 +99,7 @@ class LocalBus:
             return False
 
         self._queue.put((topic, payload))
+        self._pub_counts[topic] = self._pub_counts.get(topic, 0) + 1
         return True
 
     # ── Subscribe ────────────────────────────────────────────────────
@@ -117,7 +123,7 @@ class LocalBus:
         """
         with self._lock:
             self._handlers.setdefault(topic, []).append((handler, msg_type))
-        log.debug("Subscribed handler to %s", topic)
+        log.info("Subscribed handler %s to topic %s", getattr(handler, '__name__', handler), topic)
 
     # ── Teardown ─────────────────────────────────────────────────────
 
@@ -133,6 +139,15 @@ class LocalBus:
         with self._lock:
             self._handlers.clear()
         log.info("LocalBus closed.")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return diagnostic counters for the bus."""
+        return {
+            "published": dict(self._pub_counts),
+            "dispatched": dict(self._dispatch_counts),
+            "dropped": dict(self._drop_counts),
+            "queue_size": self._queue.qsize(),
+        }
 
     # ── Dispatcher thread ────────────────────────────────────────────
 
@@ -157,10 +172,21 @@ class LocalBus:
                 with self._lock:
                     matching = self._matching_handlers(topic)
 
+                if not matching:
+                    self._drop_counts[topic] = self._drop_counts.get(topic, 0) + 1
+                    cnt = self._drop_counts[topic]
+                    if cnt <= 3 or cnt % 100 == 0:
+                        log.warning(
+                            "bus_drop topic=%s no_handlers (drop #%d) "
+                            "registered_topics=%s",
+                            topic, cnt, list(self._handlers.keys()),
+                        )
+
                 for handler, msg_type in matching:
                     try:
                         decoded = decode(payload, msg_type)
                         handler(decoded)
+                        self._dispatch_counts[topic] = self._dispatch_counts.get(topic, 0) + 1
                     except Exception:
                         log.exception(
                             "Handler %s failed for topic %s",

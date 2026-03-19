@@ -2,7 +2,7 @@
 
 # Portfolio-level limits
 MAX_OPEN_RISK_PCT = 0.02     # 2% of equity at risk across all open positions (base mode)
-MAX_TRADES_PER_DAY = 10      # safety cap (you can raise later)
+MAX_TRADES_PER_DAY = 500      # safety cap (you can raise later)
 
 # Daily shutdown limits
 DAILY_MAX_LOSS_PCT = 0.03    # 3% equity daily loss shuts down new entries
@@ -23,8 +23,8 @@ MIN_RS_VS_SPY     = 0.0025       # RS_30m delta-return vs SPY (0.25%)
 
 # Price band (exceptions via PRICE_MAX_ALLOWLIST)
 PRICE_MIN = 2.0
-PRICE_MAX = 250
+PRICE_MAX = 500
 
 # Large-cap exceptions allowed above PRICE_MAX
-PRICE_MAX_ALLOWLIST = {"NVDA", "META", "AAPL", "TSLA", "PLTR", "PANW", "MSFT", "AMZN"}
+PRICE_MAX_ALLOWLIST = {"NVDA", "META", "AAPL", "TSLA", "PLTR", "PANW", "MSFT", "AMZN", "SPY", "QQQ"}
 

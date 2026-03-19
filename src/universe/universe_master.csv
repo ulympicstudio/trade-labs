@@ -1,0 +1,98 @@
+symbol,company_name,sector,industry,subindustry,sector_etf,industry_etf,avg_daily_volume,market_cap_bucket,liquidity_tier
+AAPL,Apple Inc,Technology,Consumer Electronics,Phones,XLK,SOXX,90000000,mega,1
+MSFT,Microsoft,Technology,Software,Cloud Platforms,XLK,IGV,30000000,mega,1
+NVDA,NVIDIA,Technology,Semiconductors,AI Chips,SMH,SOXX,55000000,mega,1
+AMD,Advanced Micro Devices,Technology,Semiconductors,AI Chips,SMH,SOXX,65000000,large,1
+INTC,Intel,Technology,Semiconductors,CPU,SMH,SOXX,35000000,large,1
+AVGO,Broadcom,Technology,Semiconductors,Networking Chips,SMH,SOXX,8000000,mega,1
+QCOM,Qualcomm,Technology,Semiconductors,Mobile Chips,SMH,SOXX,9000000,large,1
+TSM,Taiwan Semiconductor,Technology,Semiconductors,Foundry,SMH,SOXX,12000000,mega,1
+MU,Micron Technology,Technology,Semiconductors,Memory,SMH,SOXX,20000000,large,1
+MRVL,Marvell Technology,Technology,Semiconductors,Networking Chips,SMH,SOXX,15000000,large,1
+ARM,ARM Holdings,Technology,Semiconductors,IP Licensing,SMH,SOXX,10000000,large,1
+TXN,Texas Instruments,Technology,Semiconductors,Analog,SMH,SOXX,6000000,mega,1
+LRCX,Lam Research,Technology,Semiconductor Equipment,Etch,SMH,SOXX,4000000,large,1
+AMAT,Applied Materials,Technology,Semiconductor Equipment,Deposition,SMH,SOXX,8000000,large,1
+KLAC,KLA Corporation,Technology,Semiconductor Equipment,Inspection,SMH,SOXX,3000000,large,1
+ASML,ASML Holding,Technology,Semiconductor Equipment,Lithography,SMH,SOXX,3000000,mega,1
+ORCL,Oracle,Technology,Software,Enterprise Software,XLK,IGV,12000000,mega,1
+CRM,Salesforce,Technology,Software,Cloud Platforms,XLK,IGV,8000000,mega,1
+ADBE,Adobe,Technology,Software,Creative Software,XLK,IGV,4000000,mega,1
+NOW,ServiceNow,Technology,Software,Cloud Platforms,XLK,IGV,2500000,large,1
+INTU,Intuit,Technology,Software,Financial Software,XLK,IGV,2000000,large,1
+PANW,Palo Alto Networks,Technology,Cybersecurity,Network Security,XLK,CIBR,6000000,large,1
+CRWD,CrowdStrike,Technology,Cybersecurity,Endpoint Security,XLK,CIBR,5000000,large,1
+FTNT,Fortinet,Technology,Cybersecurity,Network Security,XLK,CIBR,4000000,large,1
+ZS,Zscaler,Technology,Cybersecurity,Cloud Security,XLK,CIBR,3000000,mid,1
+SMCI,Super Micro Computer,Technology,Servers,AI Infrastructure,XLK,SOXX,40000000,mid,1
+META,Meta Platforms,Communication Services,Social Media,Digital Advertising,XLC,SOCL,18000000,mega,1
+GOOG,Alphabet,Communication Services,Internet Services,Search & Cloud,XLC,SOCL,25000000,mega,1
+GOOGL,Alphabet Class A,Communication Services,Internet Services,Search & Cloud,XLC,SOCL,22000000,mega,1
+NFLX,Netflix,Communication Services,Streaming,Video Streaming,XLC,SOCL,6000000,mega,1
+DIS,Walt Disney,Communication Services,Entertainment,Media Conglomerate,XLC,SOCL,10000000,mega,1
+AMZN,Amazon,Consumer Discretionary,E-Commerce,Online Retail,XLY,XRT,40000000,mega,1
+TSLA,Tesla,Consumer Discretionary,Automotive,Electric Vehicles,XLY,CARZ,80000000,mega,1
+HD,Home Depot,Consumer Discretionary,Home Improvement,Retail,XLY,XRT,4000000,mega,1
+LOW,Lowes,Consumer Discretionary,Home Improvement,Retail,XLY,XRT,3000000,large,1
+NKE,Nike,Consumer Discretionary,Apparel,Athletic Wear,XLY,XRT,8000000,large,1
+SBUX,Starbucks,Consumer Discretionary,Restaurants,Coffee Chains,XLY,XRT,7000000,large,1
+MCD,McDonalds,Consumer Discretionary,Restaurants,Fast Food,XLY,XRT,4000000,mega,1
+BABA,Alibaba,Consumer Discretionary,E-Commerce,China E-Commerce,XLY,KWEB,15000000,large,1
+JPM,JPMorgan Chase,Financials,Banks,Money Center Banks,XLF,KBE,10000000,mega,1
+BAC,Bank of America,Financials,Banks,Money Center Banks,XLF,KBE,35000000,mega,1
+GS,Goldman Sachs,Financials,Investment Banking,Full Service,XLF,KBE,3000000,mega,1
+MS,Morgan Stanley,Financials,Investment Banking,Full Service,XLF,KBE,8000000,large,1
+WFC,Wells Fargo,Financials,Banks,Regional Banks,XLF,KBE,15000000,mega,1
+C,Citigroup,Financials,Banks,Money Center Banks,XLF,KBE,12000000,large,1
+V,Visa,Financials,Payments,Card Networks,XLF,IPAY,7000000,mega,1
+MA,Mastercard,Financials,Payments,Card Networks,XLF,IPAY,4000000,mega,1
+XOM,Exxon Mobil,Energy,Oil & Gas Integrated,Oil Majors,XLE,XLE,20000000,mega,1
+CVX,Chevron,Energy,Oil & Gas Integrated,Oil Majors,XLE,XLE,8000000,mega,1
+COP,ConocoPhillips,Energy,Oil & Gas E&P,Shale,XLE,XOP,7000000,large,1
+SLB,Schlumberger,Energy,Oil Services,Drilling Services,XLE,OIH,10000000,large,1
+HAL,Halliburton,Energy,Oil Services,Completions,XLE,OIH,8000000,mid,1
+OXY,Occidental Petroleum,Energy,Oil & Gas E&P,Permian Basin,XLE,XOP,12000000,mid,1
+JNJ,Johnson & Johnson,Healthcare,Pharmaceuticals,Diversified Pharma,XLV,XBI,7000000,mega,1
+UNH,UnitedHealth Group,Healthcare,Health Insurance,Managed Care,XLV,IHF,4000000,mega,1
+PFE,Pfizer,Healthcare,Pharmaceuticals,Major Pharma,XLV,XBI,30000000,mega,1
+LLY,Eli Lilly,Healthcare,Pharmaceuticals,Specialty Pharma,XLV,XBI,4000000,mega,1
+ABBV,AbbVie,Healthcare,Pharmaceuticals,Specialty Pharma,XLV,XBI,6000000,mega,1
+MRK,Merck,Healthcare,Pharmaceuticals,Major Pharma,XLV,XBI,10000000,mega,1
+BMY,Bristol-Myers Squibb,Healthcare,Pharmaceuticals,Specialty Pharma,XLV,XBI,12000000,large,1
+MRNA,Moderna,Healthcare,Biotechnology,mRNA Therapeutics,XLV,XBI,8000000,mid,1
+ISRG,Intuitive Surgical,Healthcare,Medical Devices,Surgical Robotics,XLV,IHI,2000000,large,1
+CAT,Caterpillar,Industrials,Machinery,Heavy Equipment,XLI,XLI,3000000,mega,1
+DE,Deere & Co,Industrials,Machinery,Agriculture Equipment,XLI,XLI,2000000,mega,1
+BA,Boeing,Industrials,Aerospace & Defense,Commercial Aerospace,XLI,ITA,12000000,mega,1
+LMT,Lockheed Martin,Industrials,Aerospace & Defense,Defense Contractors,XLI,ITA,1500000,large,1
+RTX,RTX Corporation,Industrials,Aerospace & Defense,Defense Contractors,XLI,ITA,5000000,large,1
+GE,GE Aerospace,Industrials,Aerospace & Defense,Jet Engines,XLI,ITA,8000000,mega,1
+UNP,Union Pacific,Industrials,Railroads,Class I Railroads,XLI,IYT,3000000,mega,1
+UPS,UPS,Industrials,Logistics,Package Delivery,XLI,IYT,3000000,large,1
+PG,Procter & Gamble,Consumer Staples,Household Products,Consumer Goods,XLP,XLP,6000000,mega,1
+KO,Coca-Cola,Consumer Staples,Beverages,Soft Drinks,XLP,XLP,12000000,mega,1
+PEP,PepsiCo,Consumer Staples,Beverages,Soft Drinks,XLP,XLP,5000000,mega,1
+WMT,Walmart,Consumer Staples,Retail,Discount Retail,XLP,XRT,8000000,mega,1
+COST,Costco,Consumer Staples,Retail,Warehouse Clubs,XLP,XRT,3000000,mega,1
+LIN,Linde,Materials,Specialty Chemicals,Industrial Gases,XLB,XLB,2000000,mega,1
+APD,Air Products,Materials,Specialty Chemicals,Industrial Gases,XLB,XLB,1500000,large,1
+FCX,Freeport-McMoRan,Materials,Mining,Copper,XLB,XME,15000000,large,1
+NEM,Newmont,Materials,Mining,Gold,XLB,GDX,8000000,large,1
+NEE,NextEra Energy,Utilities,Electric Utilities,Renewable Energy,XLU,XLU,8000000,mega,1
+SO,Southern Company,Utilities,Electric Utilities,Regulated Utilities,XLU,XLU,5000000,large,1
+DUK,Duke Energy,Utilities,Electric Utilities,Regulated Utilities,XLU,XLU,3000000,large,1
+AMT,American Tower,Real Estate,REITs,Cell Tower REITs,XLRE,VNQ,3000000,large,1
+PLD,Prologis,Real Estate,REITs,Industrial REITs,XLRE,VNQ,4000000,large,1
+SPG,Simon Property Group,Real Estate,REITs,Retail REITs,XLRE,VNQ,3000000,mid,1
+COIN,Coinbase,Financials,Fintech,Crypto Exchange,XLF,ARKF,15000000,mid,1
+SQ,Block Inc,Financials,Fintech,Digital Payments,XLF,ARKF,8000000,mid,1
+PLTR,Palantir,Technology,Software,Data Analytics,XLK,IGV,40000000,mid,1
+NET,Cloudflare,Technology,Software,Edge Computing,XLK,WCLD,6000000,mid,1
+SNOW,Snowflake,Technology,Software,Cloud Data,XLK,WCLD,4000000,mid,1
+DDOG,Datadog,Technology,Software,Observability,XLK,WCLD,3000000,mid,1
+UBER,Uber,Technology,Software,Ride Sharing,XLK,ARKK,18000000,large,1
+SHOP,Shopify,Technology,Software,E-Commerce Platform,XLK,WCLD,8000000,large,1
+RIVN,Rivian,Consumer Discretionary,Automotive,Electric Vehicles,XLY,CARZ,25000000,mid,2
+LCID,Lucid Group,Consumer Discretionary,Automotive,Electric Vehicles,XLY,CARZ,20000000,small,2
+ENPH,Enphase Energy,Energy,Solar,Microinverters,XLE,TAN,5000000,mid,1
+FSLR,First Solar,Energy,Solar,Solar Panels,XLE,TAN,3000000,mid,1

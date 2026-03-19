@@ -14,11 +14,24 @@ Sessions
 from __future__ import annotations
 
 import os
+import logging
 from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Optional
 
+_log = logging.getLogger("session")
+
 # ── Force-session override (for dev / testing) ──────────────────────
+# FORCE_SESSION: hard override — changes the session returned by
+# get_us_equity_session() for ALL arms (backward compat).
 _FORCE_SESSION = os.environ.get("FORCE_SESSION", "").upper().strip()
+
+# TL_TEST_FORCE_SESSION: pipeline-gate override — bypasses specific
+# session gates (risk blueprint gate, execution session gate) without
+# changing the session that signal/ingest see.  This lets signal keep
+# its natural OFF_HOURS / PREMARKET flow while unblocking downstream.
+_TEST_FORCE_SESSION = os.environ.get(
+    "TL_TEST_FORCE_SESSION", ""
+).upper().strip()
 
 # ── Session constants ────────────────────────────────────────────────
 OFF_HOURS = "OFF_HOURS"
@@ -79,6 +92,10 @@ def get_us_equity_session(now_utc: Optional[datetime] = None) -> str:
         One of ``OFF_HOURS``, ``PREMARKET``, ``RTH``, ``AFTERHOURS``.
     """
     if _FORCE_SESSION in (OFF_HOURS, PREMARKET, RTH, AFTERHOURS):
+        _log.debug(
+            "forced_session_override requested=%s effective=%s source=env",
+            _FORCE_SESSION, _FORCE_SESSION,
+        )
         return _FORCE_SESSION
 
     if now_utc is None:
@@ -96,3 +113,20 @@ def get_us_equity_session(now_utc: Optional[datetime] = None) -> str:
     if t < _AH_CLOSE:
         return AFTERHOURS
     return OFF_HOURS
+
+
+def is_test_session_forced() -> bool:
+    """Return True when TL_TEST_FORCE_SESSION is set to a valid session.
+
+    Arms should call this to decide whether to relax session-specific
+    gates (e.g. risk blueprint gate, execution session gate) during
+    dev / testing.  Does NOT affect the session seen by signal/ingest.
+    """
+    return _TEST_FORCE_SESSION in (OFF_HOURS, PREMARKET, RTH, AFTERHOURS)
+
+
+def get_test_force_session() -> str:
+    """Return the TL_TEST_FORCE_SESSION value, or empty string."""
+    if _TEST_FORCE_SESSION in (OFF_HOURS, PREMARKET, RTH, AFTERHOURS):
+        return _TEST_FORCE_SESSION
+    return ""

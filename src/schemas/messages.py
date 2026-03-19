@@ -38,6 +38,7 @@ class MarketSnapshot:
     vwap: float = 0.0
     atr: float = 0.0
     rsi14: Optional[float] = None
+    rvol: Optional[float] = None      # relative volume (vs lookback avg)
 
 
 # ── News ─────────────────────────────────────────────────────────────
@@ -109,6 +110,12 @@ class WatchCandidate:
     liq_points: float = 0.0
     total_score: float = 0.0
     quality: str = ""  # HIGH / MED / LOW
+    # ── Composite Intelligence Layer ──
+    symbol_score: float = 0.0
+    sector_score: float = 0.0
+    industry_score: float = 0.0
+    market_score: float = 0.0
+    composite_score: float = 0.0
 
 
 @dataclass
@@ -137,6 +144,22 @@ class OpenPlanCandidate:
     # ── News Shock Engine v1 ──
     impact_score: int = 0
     burst_flag: bool = False
+    # ── Event-gate fields (structural gating) ──
+    event_score: int = 0
+    strategy: str = ""            # e.g. "off_hours_board", "premarket_board"
+    event_gate_pass: bool = False # True only if event gate approved
+    tradeable: bool = False       # True when gate + quality checks pass
+    regime: str = ""              # regime at publish time
+    # ── Sector Intelligence ──
+    sector: str = ""              # e.g. "Technology"
+    industry: str = ""            # e.g. "Semiconductors"
+    sector_state: str = ""        # LEADING / NEUTRAL / WEAK
+    # ── Composite Intelligence Layer ──
+    symbol_score: float = 0.0
+    sector_score: float = 0.0
+    industry_score: float = 0.0
+    market_score: float = 0.0
+    composite_score: float = 0.0
 
 
 @dataclass
@@ -168,6 +191,10 @@ class PlanDraft:
     # ── News Shock Engine v1 ──
     impact_score: int = 0
     burst_flag: bool = False
+    # ── Sector Intelligence ──
+    sector: str = ""              # e.g. "Technology"
+    industry: str = ""            # e.g. "Semiconductors"
+    sector_state: str = ""        # LEADING / NEUTRAL / WEAK
 
 # ── Order blueprint (execution-ready, paper or live) ─────────────────
 
@@ -200,6 +227,11 @@ class OrderBlueprint:
     impact_score: int = 0
     burst_flag: bool = False
     escalation: bool = False
+    source: str = ""              # "open_plan" | "trade_intent"
+    # ── Sector Intelligence ──
+    sector: str = ""              # e.g. "Technology"
+    industry: str = ""            # e.g. "Semiconductors"
+    sector_state: str = ""        # LEADING / NEUTRAL / WEAK
 
 
 # ── Order planning ───────────────────────────────────────────────────

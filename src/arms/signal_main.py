@@ -45,6 +45,102 @@ from src.schemas.messages import (
 )
 from src.market.session import get_us_equity_session, OFF_HOURS, PREMARKET
 from src.utils.playbook_io import load_playbook_symbols, load_playbook_drafts
+from src.signals.regime import (
+    update_index as _regime_update_index,
+    get_regime as _get_regime,
+    STRATEGY_GATE as _STRATEGY_GATE,
+    TREND_UP, TREND_DOWN, CHOP, PANIC,
+    VOL_HIGH as _VOL_HIGH,
+)
+from src.signals.event_score import compute_event_score as _compute_event_score
+from src.signals.squeeze import (
+    update as _squeeze_update,
+    get_squeeze as _get_squeeze,
+)
+from src.signals.sector_intel import (
+    update_sector_from_snapshot as _sector_snap,
+    update_sector_from_news as _sector_news,
+    get_sector_alignment as _get_sector_alignment,
+    check_state_changes as _sector_check_states,
+)
+from src.universe.sector_mapper import classify_symbol as _classify_symbol
+from src.signals.volatility_leaders import (
+    update_volatility as _vol_update,
+    compute_leader as _vol_compute_leader,
+    get_leader_summary as _vol_leader_summary,
+    VOL_ENABLED as _VOL_ENABLED,
+)
+from src.signals.industry_rotation import (
+    update_industry_rotation as _rotation_snap,
+    update_industry_news as _rotation_news,
+    update_industry_volatility as _rotation_vol,
+    compute_industry_rotation as _rotation_compute,
+    get_rotation_summary as _rotation_summary,
+    get_rotation_state_bonus as _rotation_bonus,
+    ROTATION_ENABLED as _ROTATION_ENABLED,
+)
+from src.signals.allocation_engine import (
+    compute_allocation_decision as _alloc_decide,
+    score_symbol_confluence as _alloc_confluence,
+    check_bucket_capacity as _alloc_bucket_cap,
+    record_bucket_fill as _alloc_record_fill,
+    get_allocation_summary as _alloc_summary,
+    ALLOC_ENABLED as _ALLOC_ENABLED,
+)
+from src.signals.market_mode import (
+    compute_market_mode as _mm_compute,
+    get_market_mode_summary as _mm_summary,
+    MODE_ENABLED as _MM_ENABLED,
+)
+from src.universe.composite_score import (
+    compute_composite as _compute_composite,
+    COMPOSITE_ENABLED as _COMPOSITE_ENABLED,
+)
+from src.signals.sector_rotation_selector import (
+    compute_sector_rotation_decision as _compute_rotation_decision,
+    get_last_rotation_decision as _get_last_rotation_decision,
+    ROTATION_SEL_ENABLED as _ROTATION_SEL_ENABLED,
+)
+from src.universe.dynamic_universe import (
+    build_dynamic_universe as _build_dynamic_universe,
+    get_last_decision as _get_dyn_universe_decision,
+    DYNAMIC_UNIVERSE_ENABLED as _DYN_UNIVERSE_ENABLED,
+)
+from src.universe.scan_scheduler import (
+    build_scan_schedule as _build_scan_schedule,
+    get_last_schedule as _get_scan_schedule,
+    get_schedule_counts as _get_schedule_counts,
+    SCAN_SCHEDULER_ENABLED as _SCAN_SCHEDULER_ENABLED,
+    HIGH as _SCAN_HIGH,
+)
+from src.signals.sector_intel import get_sector_score as _get_sector_score
+from src.signals.industry_rotation import get_industry_score as _get_industry_score
+from src.analysis.playbook_scorecard import (
+    get_priority_bias as _sc_priority_bias,
+    get_scorecard_summary as _sc_summary,
+    SCORECARD_ENABLED as _SC_ENABLED,
+)
+from src.analysis.self_tuning import (
+    get_bucket_weight_nudge as _tune_weight,
+    get_priority_nudge as _tune_priority,
+    get_threshold_nudge as _tune_threshold,
+    get_cap_mult_nudge as _tune_cap_mult,
+    compute_tuning_decision as _tune_compute,
+    get_tuning_snapshot as _tune_snapshot,
+    TUNING_ENABLED as _TUNING_ENABLED,
+)
+from src.analysis.pnl_attribution import (
+    compute_attribution_summary as _attrib_summary,
+    ATTRIB_ENABLED as _ATTRIB_ENABLED,
+)
+from src.signals.sector_intel import get_sector_summary as _get_sector_summary
+from src.signals.volatility_leaders import get_top_leaders as _get_vol_top_leaders
+from src.signals.industry_rotation import get_top_industries as _get_rotation_top
+from src.signals.agent_intel import (
+    get_agent_score_boost as _agent_boost,
+    get_symbol_intel as _agent_intel,
+    get_all_active_intel as _agent_all_active,
+)
 
 log = get_logger("signal")
 
@@ -55,11 +151,16 @@ _CONFIDENCE_BASE = float(os.environ.get("TL_SIG_CONFIDENCE_BASE", "0.70"))
 _CONFIDENCE_NEWS_BOOST = float(os.environ.get("TL_SIG_NEWS_BOOST", "0.10"))
 _ATR_STOP_MULT = float(os.environ.get("TL_SIG_ATR_STOP_MULT", "2.0"))
 _COOLDOWN_S = float(os.environ.get("TL_SIG_COOLDOWN_S", "60"))  # min seconds between intents per symbol
+_COOLDOWN_CONSENSUS_S = float(os.environ.get("TL_SIG_COOLDOWN_CONSENSUS_S", "300"))  # longer cooldown after consensus-driven intent
+_CONFIDENCE_CONSENSUS_BOOST = float(os.environ.get("TL_SIG_CONSENSUS_CONF_BOOST", "0.15"))  # extra confidence for consensus events
+_CONSENSUS_TRADE_ENABLED = os.environ.get("TL_SIG_CONSENSUS_TRADE", "true").lower() in ("1", "true", "yes")
+_CONSENSUS_MIN_PROVIDERS = int(os.environ.get("TL_SIG_CONSENSUS_MIN_PROVIDERS", "2"))
+_CONSENSUS_MIN_IMPACT = int(os.environ.get("TL_SIG_CONSENSUS_MIN_IMPACT", "3"))
 _CACHE_MAX_SNAPS = int(os.environ.get("TL_SIG_CACHE_MAX_SNAPS", "50"))
 _CACHE_MAX_NEWS = int(os.environ.get("TL_SIG_CACHE_MAX_NEWS", "20"))
 _NEWS_RECENCY_S = float(os.environ.get("TL_SIG_NEWS_RECENCY_S", "300"))  # 5 min
 _FORCE_INTENT = os.environ.get("SIGNAL_FORCE_INTENT", "false").lower() in ("1", "true", "yes")
-_FORCE_INTENT_INTERVAL_S = 60.0  # emit a forced intent every N seconds
+_FORCE_INTENT_INTERVAL_S = float(os.environ.get("TL_TEST_FORCE_INTENT_INTERVAL", "60"))  # emit a forced intent every N seconds
 
 # Dev-strategy flag: auto-enabled in PAPER + local bus, or explicit override
 _DEV_STRATEGY_DEFAULT = (
@@ -71,6 +172,57 @@ _DEV_STRATEGY = os.environ.get(
 ).lower() in ("1", "true", "yes")
 
 _MAX_INTENTS_PER_SYMBOL_PER_HOUR = 3
+
+# ── EventScore gating thresholds ─────────────────────────────────────
+_ES_MIN_RSI = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_RSI", "35"))
+_ES_MIN_DEV = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_DEV", "25"))
+_ES_MIN_CONSENSUS = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_CONSENSUS", "45"))
+_ES_MIN_VOL = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_VOL", "30"))
+_ES_SOFT_MARGIN = 10  # within this margin of threshold → soft penalty
+
+# ── B: Consensus RSI bypass ────────────────────────────────────────────
+_CONSENSUS_BYPASS_RSI = os.environ.get(
+    "TL_SIG_CONSENSUS_BYPASS_RSI", "true"
+).lower() in ("1", "true", "yes")
+_CONSENSUS_BYPASS_MIN_PROVIDERS = int(os.environ.get("TL_SIG_CONSENSUS_BYPASS_MIN_PROVIDERS", "3"))
+
+# ── D: Regime strategy gating ───────────────────────────────────────────
+_REGIME_GATE_ENABLED = os.environ.get(
+    "TL_SIG_REGIME_GATE", "true"
+).lower() in ("1", "true", "yes")
+
+# ── F: Adaptive spread filter using ATR% ───────────────────────────
+_SPREAD_ATR_MULT = float(os.environ.get("TL_SIG_SPREAD_ATR_MULT", "0.40"))
+_SPREAD_MIN = float(os.environ.get("TL_SIG_SPREAD_MIN", "0.0005"))
+_SPREAD_MAX = float(os.environ.get("TL_SIG_SPREAD_MAX", "0.0050"))
+
+# ── I: Session awareness ───────────────────────────────────────────────
+_SESSION_AWARE = os.environ.get(
+    "TL_SIG_SESSION_AWARE", "true"
+).lower() in ("1", "true", "yes")
+_MIDDAY_MIN_EVENT = int(os.environ.get("TL_SIG_MIDDAY_MIN_EVENT", "60"))
+_OPEN_SPREAD_WIDEN = float(os.environ.get("TL_SIG_OPEN_SPREAD_WIDEN", "1.2"))
+_last_session_log_ts: float = 0.0
+
+# ── Deterministic test-mode toggles (force-path validation) ──────────
+_TEST_FORCE_EVENT_SCORE = int(os.environ.get("TL_TEST_FORCE_EVENT_SCORE", "0"))
+_TEST_FORCE_CONSENSUS = int(os.environ.get("TL_TEST_FORCE_CONSENSUS", "0"))
+_TEST_FORCE_SPREAD_PCT = float(os.environ.get("TL_TEST_FORCE_SPREAD_PCT", "0"))
+
+# ── Armed-not-triggered observability counters (reset per minute) ────
+_obs_event_gate_armed: int = 0
+_obs_event_gate_fired: int = 0
+_obs_consensus_bypass_armed: int = 0
+_obs_consensus_bypass_fired: int = 0
+_obs_spread_gate_armed: int = 0
+_obs_spread_gate_fired: int = 0
+_obs_regime_gate_armed: int = 0
+_obs_regime_gate_fired: int = 0
+_obs_last_reset_ts: float = 0.0
+
+# ── Blocked strategy reason counters (reset per minute) ──────────────
+_blocked_counts: Dict[str, int] = {}       # strategy_name → blocked count
+_blocked_reasons: Dict[str, int] = {}      # reason_string → count
 
 # ── OFF_HOURS board settings ─────────────────────────────────────────
 _OFF_HOURS_PUBLISH_INTERVAL_S = 30.0
@@ -178,6 +330,34 @@ class SymbolCache:
         default_factory=lambda: deque(maxlen=_CACHE_MAX_NEWS)
     )
     last_intent_ts: float = 0.0  # epoch — for cooldown
+    last_intent_consensus: bool = False  # whether last intent was consensus-driven
+
+    # EventScore state (populated every _evaluate cycle)
+    last_event_score: int = 0
+    last_event_playbook: str = ""
+    last_event_risk_mode: str = "LOW"
+
+    # Volatility leadership state
+    last_vol_score: int = 0
+    last_vol_state: str = "QUIET"
+
+    # Industry rotation state
+    last_rotation_score: int = 0
+    last_rotation_state: str = "NEUTRAL"
+
+    # Allocation / confluence state
+    last_priority: float = 0.0
+    last_confluence: float = 0.0
+    last_bucket: str = "none"
+
+    # Composite intelligence layer
+    last_composite_score: float = 0.0
+    last_sector_score: float = 0.0
+    last_industry_score: float = 0.0
+    last_market_score: float = 0.0
+
+    # Phase B: scan priority
+    scan_priority: str = "NORMAL"
 
 
 _cache: Dict[str, SymbolCache] = {}
@@ -185,12 +365,19 @@ _lock = threading.Lock()
 
 # ── Runtime state ────────────────────────────────────────────────────
 _running = True
+_stop_event = threading.Event()  # cooperative shutdown
 _bus = None  # type: Any
 _intents_emitted = 0
 _snapshots_received = 0
 _news_received = 0
 _last_forced_intent_ts: float = 0.0
 _intent_hourly_ts: Dict[str, list] = {}  # symbol → [epoch, …] of recent intents
+
+# ── Phase B: Dynamic Universe + Rotation Selector state ──────────────
+_last_rotation_decision_ts: float = 0.0
+_ROTATION_DECISION_INTERVAL_S = float(os.environ.get("TL_ROTATION_DECISION_INTERVAL_S", "30"))
+_last_scan_schedule: Dict[str, str] = {}  # symbol → HIGH/NORMAL/LOW
+_SCAN_PRIORITY_BONUS = float(os.environ.get("TL_SCAN_PRIORITY_BONUS", "3.0"))  # bonus for HIGH priority symbols
 
 # ── Poll-cycle tracking (for diagnostic) ────────────────────────────
 _POLL_INTERVAL_S = float(os.environ.get("TL_INGEST_INTERVAL_S", "10"))
@@ -338,6 +525,8 @@ class _OffHoursScore:
     # News Shock Engine v1
     impact_score: int = 0
     burst_flag: bool = False
+    # Agent Intelligence boost/penalty
+    agent_boost: float = 0.0
 
     @property
     def total(self) -> float:
@@ -348,6 +537,7 @@ class _OffHoursScore:
             + self.momentum_pts * _W_MOM
             + self.spread_points * _W_SPREAD
             + self.rsi_points * _W_RSI
+            + self.agent_boost
         )
 
 
@@ -398,6 +588,8 @@ class _PremarketScore:
     # News Shock Engine v1
     impact_score: int = 0
     burst_flag: bool = False
+    # Agent Intelligence boost/penalty
+    agent_boost: float = 0.0
 
     @property
     def total(self) -> float:
@@ -408,6 +600,7 @@ class _PremarketScore:
             + self.spread_points * _PREMARKET_SPREAD_WEIGHT
             + self.rsi_points * _PREMARKET_RSI_WEIGHT
             + self.rvol_points  # rvol_points already weighted (0-3)
+            + self.agent_boost
         )
 
 
@@ -421,6 +614,7 @@ def _handle_signal(signum, _frame):
     global _running
     log.info("Received shutdown signal (%s)", signum)
     _running = False
+    _stop_event.set()
 
 
 # ── Cache helpers ────────────────────────────────────────────────────
@@ -443,6 +637,26 @@ def _recent_news_sentiment(sc: SymbolCache) -> Optional[float]:
         if n.sentiment is not None:
             scores.append(n.sentiment)
     return (sum(scores) / len(scores)) if scores else None
+
+
+def _recent_consensus_count(sc: SymbolCache) -> int:
+    """Return max consensus provider count from recent news (last ``_NEWS_RECENCY_S``).
+
+    Scans impact_tags for ``CONSENSUS:N`` tags.  Returns 0 if no consensus.
+    """
+    now = time.time()
+    best = 0
+    for n in reversed(sc.news):
+        age = now - n.ts.timestamp() if hasattr(n.ts, "timestamp") else _NEWS_RECENCY_S + 1
+        if age > _NEWS_RECENCY_S:
+            break
+        for tag in (n.impact_tags or []):
+            if tag.startswith("CONSENSUS:"):
+                try:
+                    best = max(best, int(tag.split(":")[1]))
+                except (IndexError, ValueError):
+                    pass
+    return best
 
 
 # ── Hourly-cap helper ──────────────────────────────────────────────
@@ -504,6 +718,9 @@ def _emit_intent(
 
     with _lock:
         sc.last_intent_ts = now
+        sc.last_intent_consensus = any(
+            rc.startswith("consensus=") for rc in intent.reason_codes
+        )
         _intents_emitted += 1
     _record_intent(intent.symbol, now)
 
@@ -646,6 +863,11 @@ def _update_off_hours_score(
         if dq and len(dq) >= _NEWS_BURST_COUNT:
             sym_burst = True
 
+    # ── Agent Intelligence boost ─────────────────────────────────
+    _ab = _agent_boost(sym)
+    if _ab != 0.0:
+        reasons.append(f"agent={_ab:+.1f}")
+
     score = _OffHoursScore(
         news_points=news_points,
         momentum_pts=momentum_pts,
@@ -667,6 +889,7 @@ def _update_off_hours_score(
         latest_headline_ts=latest_hl_ts,
         impact_score=sym_impact,
         burst_flag=sym_burst,
+        agent_boost=_ab,
     )
 
     with _off_hours_board_lock:
@@ -735,8 +958,15 @@ def _publish_off_hours_board() -> None:
             continue  # warrants / units
         hard_pool.append((sym, sc))
 
-    # Sort: weighted total desc → news_count desc → recency desc
-    hard_pool.sort(key=lambda x: (-x[1].total, -x[1].news_count_2h, -x[1].last_update_ts))
+    # Sort: composite (if enabled) → total desc → news_count desc → recency desc
+    def _off_hours_sort_key(x):
+        sym, sc = x
+        if _COMPOSITE_ENABLED:
+            _c = _cache.get(sym)
+            _cscore = _c.last_composite_score if _c else 0.0
+            return (-_cscore, -sc.total, -sc.news_count_2h, -sc.last_update_ts)
+        return (-sc.total, -sc.news_count_2h, -sc.last_update_ts)
+    hard_pool.sort(key=_off_hours_sort_key)
     _diag_hard_pool = len(hard_pool)
 
     # ── Stage 2: Top FUNNEL_TOP from HARD pool ───────────────────────
@@ -912,6 +1142,7 @@ def _publish_off_hours_board() -> None:
     _diag_published_news_dist = news_dist
 
     published = 0
+    _regime_now = _get_regime()
     for sym, sc, quality in top_n:
         conf = round(sc.total / _OFF_HOURS_MAX_SCORE, 3)
         # Append quality + low_quality marker to reason codes
@@ -919,6 +1150,28 @@ def _publish_off_hours_board() -> None:
         pub_reasons.append(f"quality={quality}")
         if quality == "LOW":
             pub_reasons.append("low_quality")
+
+        # ── Agent Intelligence enrichment ──────────────────────
+        _sym_ai = _agent_intel(sym)
+        if _sym_ai is not None:
+            pub_reasons.append(f"agent_catalyst={_sym_ai.catalyst_type}")
+            if _sym_ai.risk_flags:
+                pub_reasons.append(f"agent_risk={','.join(_sym_ai.risk_flags)}")
+
+        # ── Event gate fields for structural gating ──────────────────
+        _sym_cache = _cache.get(sym)
+        _sym_es = _sym_cache.last_event_score if _sym_cache else 0
+        _gate_pass = _sym_es >= _ES_MIN_DEV
+        _tradeable = _gate_pass and quality in ("HIGH", "MED")
+        _sp = _classify_symbol(sym)
+
+        # ── Composite intelligence fields ────────────────────────
+        _sc_cache = _cache.get(sym)
+        _comp_sc = _sc_cache.last_composite_score if _sc_cache else 0.0
+        _sec_sc = _sc_cache.last_sector_score if _sc_cache else 0.0
+        _ind_sc = _sc_cache.last_industry_score if _sc_cache else 0.0
+        _mkt_sc = _sc_cache.last_market_score if _sc_cache else 0.0
+
         watch = WatchCandidate(
             symbol=sym,
             score=sc.total,
@@ -934,6 +1187,11 @@ def _publish_off_hours_board() -> None:
             liq_points=sc.liq_points,
             total_score=sc.total,
             quality=quality,
+            symbol_score=float(sc.total),
+            sector_score=_sec_sc,
+            industry_score=_ind_sc,
+            market_score=_mkt_sc,
+            composite_score=_comp_sc,
         )
         plan_cand = OpenPlanCandidate(
             symbol=sym,
@@ -955,6 +1213,23 @@ def _publish_off_hours_board() -> None:
             quality=quality,
             impact_score=sc.impact_score,
             burst_flag=sc.burst_flag,
+            event_score=_sym_es,
+            strategy="off_hours_board",
+            event_gate_pass=_gate_pass,
+            tradeable=_tradeable,
+            regime=_regime_now.regime,
+            sector=_sp.sector,
+            industry=_sp.industry,
+            sector_state=_get_sector_alignment(sym).sector_state,
+            symbol_score=float(sc.total),
+            sector_score=_sec_sc,
+            industry_score=_ind_sc,
+            market_score=_mkt_sc,
+            composite_score=_comp_sc,
+        )
+        log.info(
+            "open_plan_candidate_created symbol=%s score=%d strategy=%s gate_pass=%s sector=%s",
+            sym, _sym_es, "off_hours_board", _gate_pass, _sp.sector,
         )
         if _bus is not None:
             _bus.publish(WATCH_CANDIDATE, watch)
@@ -1172,6 +1447,11 @@ def _update_premarket_score(snap: MarketSnapshot, sc: SymbolCache, now: float) -
         if dq and len(dq) >= _NEWS_BURST_COUNT:
             sym_burst = True
 
+    # ── Agent Intelligence boost ─────────────────────────────────
+    _ab = _agent_boost(sym)
+    if _ab != 0.0:
+        reasons.append(f"agent={_ab:+.1f}")
+
     score = _PremarketScore(
         gap_points=gap_points,
         vol_points=vol_points,
@@ -1197,6 +1477,7 @@ def _update_premarket_score(snap: MarketSnapshot, sc: SymbolCache, now: float) -
         quality=quality,
         impact_score=sym_impact,
         burst_flag=sym_burst,
+        agent_boost=_ab,
     )
 
     with _premarket_board_lock:
@@ -1229,8 +1510,15 @@ def _publish_premarket_board() -> None:
             continue
         filtered.append((sym, sc))
 
-    # Sort by total desc → gap_pct abs desc → news desc
-    filtered.sort(key=lambda x: (-x[1].total, -abs(x[1].gap_pct), -x[1].news_count_2h))
+    # Sort: composite (if enabled) → total desc → gap_pct abs desc → news desc
+    def _premarket_sort_key(x):
+        sym, sc = x
+        if _COMPOSITE_ENABLED:
+            _c = _cache.get(sym)
+            _cscore = _c.last_composite_score if _c else 0.0
+            return (-_cscore, -sc.total, -abs(sc.gap_pct), -sc.news_count_2h)
+        return (-sc.total, -abs(sc.gap_pct), -sc.news_count_2h)
+    filtered.sort(key=_premarket_sort_key)
 
     # ── News Shock: prepend shock candidates to ensure they enter top_n ──
     if _NEWS_SHOCK_ENABLED:
@@ -1246,6 +1534,7 @@ def _publish_premarket_board() -> None:
     top_n = filtered[:_PREMARKET_TOP_N]
 
     published = 0
+    _regime_now = _get_regime()
     for sym, sc in top_n:
         conf = round(sc.total / _PREMARKET_MAX_SCORE, 3) if _PREMARKET_MAX_SCORE > 0 else 0.0
 
@@ -1255,6 +1544,26 @@ def _publish_premarket_board() -> None:
             pub_reasons.append(f"pb_entry={sc.playbook_entry:.2f}")
         if sc.rvol > 0:
             pub_reasons.append(f"rvol={sc.rvol:.1f}x")
+
+        # ── Agent Intelligence enrichment ──────────────────────
+        _sym_ai = _agent_intel(sym)
+        if _sym_ai is not None:
+            pub_reasons.append(f"agent_catalyst={_sym_ai.catalyst_type}")
+            if _sym_ai.risk_flags:
+                pub_reasons.append(f"agent_risk={','.join(_sym_ai.risk_flags)}")
+
+        # ── Event gate fields for structural gating ──────────────────
+        _sym_cache = _cache.get(sym)
+        _sym_es = _sym_cache.last_event_score if _sym_cache else 0
+        _gate_pass = _sym_es >= _ES_MIN_DEV
+        _tradeable = _gate_pass and sc.quality in ("HIGH", "MED")
+        _sp = _classify_symbol(sym)
+
+        # ── Composite intelligence fields ────────────────────────
+        _comp_sc = _sym_cache.last_composite_score if _sym_cache else 0.0
+        _sec_sc = _sym_cache.last_sector_score if _sym_cache else 0.0
+        _ind_sc = _sym_cache.last_industry_score if _sym_cache else 0.0
+        _mkt_sc = _sym_cache.last_market_score if _sym_cache else 0.0
 
         plan_cand = OpenPlanCandidate(
             symbol=sym,
@@ -1276,6 +1585,23 @@ def _publish_premarket_board() -> None:
             quality=sc.quality,
             impact_score=sc.impact_score,
             burst_flag=sc.burst_flag,
+            event_score=_sym_es,
+            strategy="premarket_board",
+            event_gate_pass=_gate_pass,
+            tradeable=_tradeable,
+            regime=_regime_now.regime,
+            sector=_sp.sector,
+            industry=_sp.industry,
+            sector_state=_get_sector_alignment(sym).sector_state,
+            symbol_score=float(sc.total),
+            sector_score=_sec_sc,
+            industry_score=_ind_sc,
+            market_score=_mkt_sc,
+            composite_score=_comp_sc,
+        )
+        log.info(
+            "open_plan_candidate_created symbol=%s score=%d strategy=%s gate_pass=%s sector=%s",
+            sym, _sym_es, "premarket_board", _gate_pass, _sp.sector,
         )
 
         # Also publish a WatchCandidate for the monitor board
@@ -1294,6 +1620,11 @@ def _publish_premarket_board() -> None:
             liq_points=0.0,
             total_score=sc.total,
             quality=sc.quality,
+            symbol_score=float(sc.total),
+            sector_score=_sec_sc,
+            industry_score=_ind_sc,
+            market_score=_mkt_sc,
+            composite_score=_comp_sc,
         )
 
         if _bus is not None:
@@ -1622,10 +1953,25 @@ def _print_diagnostic() -> None:
 
 # ── Event handlers ──────────────────────────────────────────────────
 
+_first_snapshot_logged = False
+_first_news_logged = False
+
+
 def _on_snapshot(snap: MarketSnapshot) -> None:
     """Ingest a market snapshot and evaluate the strategy."""
     global _snapshots_received, _diag_last_cycle_count, _diag_cycle_reset_ts
+    global _first_snapshot_logged
     now = time.time()
+
+    # Log first receipt once per run
+    if not _first_snapshot_logged:
+        _first_snapshot_logged = True
+        log.info(
+            "signal first snapshot received  sym=%s  last=%.2f  bid=%.2f  "
+            "ask=%.2f  rsi14=%s  session=%s",
+            snap.symbol, snap.last, snap.bid, snap.ask,
+            snap.rsi14, snap.session,
+        )
 
     # Track unique symbols per poll cycle (≈ _POLL_INTERVAL_S window)
     if now - _diag_cycle_reset_ts > _POLL_INTERVAL_S:
@@ -1639,13 +1985,50 @@ def _on_snapshot(snap: MarketSnapshot) -> None:
         sc = _get_cache(snap.symbol)
         sc.snapshots.append(snap)
 
+    # Feed regime detector (index symbols: SPY, QQQ)
+    _regime_update_index(
+        snap.symbol, snap.last,
+        max(snap.last, snap.ask) if snap.ask > 0 else snap.last,
+        min(snap.last, snap.bid) if snap.bid > 0 else snap.last,
+    )
+    # Feed squeeze detector
+    _squeeze_update(
+        snap.symbol, snap.last,
+        max(snap.last, snap.ask) if snap.ask > 0 else snap.last,
+        min(snap.last, snap.bid) if snap.bid > 0 else snap.last,
+        snap.volume,
+    )
+    # Feed sector intelligence tracker
+    _sector_snap(snap.symbol, snap.last)
+    # Check for sector state changes + periodic heartbeat
+    _sector_check_states()
+
+    # Feed volatility leadership tracker
+    _vol_update(
+        snap.symbol, snap.last, snap.bid, snap.ask,
+        snap.volume, snap.atr, getattr(snap, 'rvol', None),
+    )
+
+    # Feed industry rotation tracker
+    _rotation_snap(snap.symbol, snap.last)
+
     _evaluate(snap, sc)
 
 
 def _on_news(news: NewsEvent) -> None:
     """Ingest a news event into the rolling cache."""
-    global _news_received
+    global _news_received, _first_news_logged
     now = time.time()
+
+    # Log first receipt once per run
+    if not _first_news_logged:
+        _first_news_logged = True
+        log.info(
+            "signal first news received  sym=%s  impact=%d  tags=%s  hl=%s",
+            news.symbol, news.impact_score,
+            getattr(news, 'impact_tags', []),
+            news.headline[:80],
+        )
 
     # ── News Shock Engine: compute impact + burst if enabled ─────────
     if _NEWS_SHOCK_ENABLED:
@@ -1669,12 +2052,147 @@ def _on_news(news: NewsEvent) -> None:
         sc = _get_cache(news.symbol)
         sc.news.append(news)
 
-    log.debug(
-        "News cached  symbol=%s  source=%s  sentiment=%s",
-        news.symbol,
-        news.source,
-        news.sentiment,
-    )
+    # Feed sector intelligence tracker
+    _sector_news(news.symbol, getattr(news, "impact_score", 0))
+
+    # Feed industry rotation tracker
+    _rotation_news(news.symbol, getattr(news, "impact_score", 0))
+
+    # Always log consensus-tagged news (regardless of NEWS_SHOCK_ENABLED)
+    _tags = getattr(news, "impact_tags", None) or []
+    _has_consensus = any(t.startswith("CONSENSUS:") for t in _tags)
+    if _has_consensus:
+        log.info(
+            "news_consensus_rx  symbol=%s  impact=%s  tags=%s  provider=%s  hl=%s",
+            news.symbol,
+            getattr(news, "impact_score", "?"),
+            _tags,
+            getattr(news, "source_provider", "?"),
+            news.headline[:80],
+        )
+    else:
+        log.debug(
+            "News cached  symbol=%s  source=%s  sentiment=%s",
+            news.symbol,
+            news.source,
+            news.sentiment,
+        )
+
+
+# ── Session-phase classifier (I) ────────────────────────────────────
+
+def _get_session_phase() -> str:
+    """Return fine-grained session phase for strategy gating.
+
+    PREMARKET, OPEN (first 30m), MIDDAY (11:00–14:00), POWER_HOUR (last 1h),
+    RTH (remaining RTH), AFTERHOURS, OFF_HOURS.
+    """
+    from datetime import datetime, timezone, timedelta, time as dtime
+    now_utc = datetime.now(timezone.utc)
+    # Reuse the session module's ET conversion
+    from src.market.session import _to_et
+    et = _to_et(now_utc)
+    t = et.time()
+    if t < dtime(4, 0):
+        return "OFF_HOURS"
+    if t < dtime(9, 30):
+        return "PREMARKET"
+    if t < dtime(10, 0):
+        return "OPEN"
+    if t < dtime(11, 0):
+        return "RTH"
+    if t < dtime(14, 0):
+        return "MIDDAY"
+    if t < dtime(15, 0):
+        return "RTH"
+    if t < dtime(16, 0):
+        return "POWER_HOUR"
+    if t < dtime(20, 0):
+        return "AFTERHOURS"
+    return "OFF_HOURS"
+
+
+# ── Adaptive spread filter (F) ──────────────────────────────────────
+
+def _adaptive_spread_limit(snap: MarketSnapshot, phase: str) -> float:
+    """Compute dynamic spread limit from ATR%, clamped to [_SPREAD_MIN, _SPREAD_MAX].
+
+    During OPEN phase, limits are widened by ``_OPEN_SPREAD_WIDEN``.
+    Falls back to static ``_SPREAD_MAX_PCT`` when ATR is unavailable.
+    """
+    if snap.atr and snap.atr > 0 and snap.last > 0:
+        atr_pct = snap.atr / snap.last
+        limit = atr_pct * _SPREAD_ATR_MULT
+    else:
+        limit = _SPREAD_MAX_PCT
+    limit = max(_SPREAD_MIN, min(_SPREAD_MAX, limit))
+    if phase == "OPEN":
+        limit *= _OPEN_SPREAD_WIDEN
+    return limit
+
+
+# ── Regime strategy gate (D) ────────────────────────────────────────
+
+def _regime_allows(strat_name: str, regime: str) -> bool:
+    """Return True if regime gate allows *strat_name*.
+
+    When ``_REGIME_GATE_ENABLED`` is False, always returns True.
+    """
+    global _obs_regime_gate_armed, _obs_regime_gate_fired
+    _obs_regime_gate_armed += 1
+    if not _REGIME_GATE_ENABLED:
+        return True
+    # Map internal strategy names → gate-set keys
+    _NAME_MAP = {
+        "DEV_MOMENTUM": "momentum",
+        "mean_revert_rsi": "mean_revert_rsi",
+        "consensus_news": "consensus_news",
+        "volatility_breakout": "breakout",
+    }
+    gate_name = _NAME_MAP.get(strat_name, strat_name)
+    allowed = _STRATEGY_GATE.get(regime, set())
+    if gate_name not in allowed:
+        _obs_regime_gate_fired += 1
+        _blocked_counts[strat_name] = _blocked_counts.get(strat_name, 0) + 1
+        _blocked_reasons["regime_gate"] = _blocked_reasons.get("regime_gate", 0) + 1
+    return gate_name in allowed
+
+
+# ── EventScore gate helper ──────────────────────────────────────────
+
+def _check_event_gate(
+    symbol: str, strat: str, score: int, min_score: int, reasons: list,
+) -> bool:
+    """Return True if *strat* is allowed by the EventScore gate.
+
+    Logs a skip line when blocked.  When score is within ``_ES_SOFT_MARGIN``
+    of the threshold the strategy is still allowed but confidence will be
+    reduced in the intent builder (see ``_apply_event_soft_penalty``).
+    """
+    global _obs_event_gate_armed, _obs_event_gate_fired
+    _obs_event_gate_armed += 1
+    if score < min_score:
+        _obs_event_gate_fired += 1
+        _blocked_counts[strat] = _blocked_counts.get(strat, 0) + 1
+        _blocked_reasons["low_event_score"] = _blocked_reasons.get("low_event_score", 0) + 1
+        log.info(
+            "event_gate_skip symbol=%s strat=%s score=%d min=%d reasons=%s",
+            symbol, strat, score, min_score, reasons,
+        )
+        return False
+    return True
+
+
+def _apply_event_soft_penalty(
+    confidence: float, score: int, min_score: int,
+) -> tuple[float, bool]:
+    """Reduce confidence slightly when score is near gate threshold.
+
+    Returns (adjusted_confidence, was_penalized).
+    """
+    if min_score <= score < min_score + _ES_SOFT_MARGIN:
+        return max(0.05, round(confidence - 0.05, 3)), True
+    return confidence, False
 
 
 # ── Strategy evaluation ─────────────────────────────────────────────
@@ -1682,6 +2200,13 @@ def _on_news(news: NewsEvent) -> None:
 def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
     """Dispatch to the appropriate strategy based on config."""
     now = time.time()
+
+    # Global declarations for observability counters (used throughout)
+    global _obs_event_gate_armed, _obs_event_gate_fired
+    global _obs_consensus_bypass_armed, _obs_consensus_bypass_fired
+    global _obs_spread_gate_armed, _obs_spread_gate_fired
+    global _obs_regime_gate_armed, _obs_regime_gate_fired
+    global _obs_last_reset_ts
 
     # ── OFF_HOURS: always score every symbol with enough data ───────
     session = get_us_equity_session()
@@ -1710,16 +2235,375 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
         _update_premarket_score(snap, sc, now)
 
     # ── Guard: cooldown ─────────────────────────────────────────────
-    if (now - sc.last_intent_ts) < _COOLDOWN_S:
+    effective_cooldown = _COOLDOWN_CONSENSUS_S if sc.last_intent_consensus else _COOLDOWN_S
+    if (now - sc.last_intent_ts) < effective_cooldown:
         return
 
     # ── Guard: hourly cap ───────────────────────────────────────────
     if not _hourly_cap_ok(snap.symbol, now):
         return
 
+    # ── Unified Event Score (observability + future gating) ──────────
+    _spread = (snap.ask - snap.bid) / snap.last if snap.bid > 0 and snap.ask > 0 and snap.last > 0 else None
+    # Force-path override: spread
+    if _TEST_FORCE_SPREAD_PCT > 0:
+        _spread = _TEST_FORCE_SPREAD_PCT
+    _consensus = _recent_consensus_count(sc)
+    # Force-path override: consensus provider count
+    if _TEST_FORCE_CONSENSUS > 0:
+        _consensus = _TEST_FORCE_CONSENSUS
+    _best_impact = 0
+    _cat_tags: List[str] = []
+    _cutoff = now - _NEWS_RECENCY_S
+    for _n in reversed(sc.news):
+        _nts = _n.ts.timestamp() if hasattr(_n.ts, "timestamp") else 0
+        if _nts < _cutoff:
+            break
+        _imp = getattr(_n, "impact_score", 0) or 0
+        if _imp > _best_impact:
+            _best_impact = _imp
+        _cat_tags.extend(t for t in (_n.impact_tags or []) if not t.startswith("CONSENSUS:"))
+
+    _regime = _get_regime()
+    _sq = _get_squeeze(snap.symbol)
+    _sa = _get_sector_alignment(snap.symbol)
+    _es = _compute_event_score(
+        consensus_n=_consensus,
+        impact_score=_best_impact,
+        category_tags=_cat_tags or None,
+        sentiment=_recent_news_sentiment(sc),
+        rsi14=snap.rsi14,
+        rvol=getattr(snap, 'rvol', None),
+        spread_pct=_spread,
+        regime=_regime.regime,
+        regime_confidence=_regime.confidence,
+        sector_align_pts=_sa.pts_sector_align,
+        sector_rs_pts=_sa.pts_sector_rs,
+        sector_heat_pts=_sa.pts_sector_heat,
+        sector_sympathy_pts=_sa.pts_sector_sympathy,
+        sector_name=_sa.sector,
+        industry_name=_sa.industry,
+        sector_state=_sa.sector_state,
+    )
+    # Force-path override: event score
+    if _TEST_FORCE_EVENT_SCORE > 0:
+        from dataclasses import replace as _dc_replace
+        _es = _dc_replace(_es, event_score=_TEST_FORCE_EVENT_SCORE,
+                          reasons=_es.reasons + [f"test_force_es={_TEST_FORCE_EVENT_SCORE}"])
+
+    # ── Industry rotation bonus/penalty on event score ───────────────
+    _rot_preview = _rotation_compute(snap.symbol)
+    _rot_bonus = _rotation_bonus(_rot_preview.rotation_state)
+    if _rot_bonus != 0:
+        from dataclasses import replace as _dc_replace2
+        _adj_score = max(0, min(100, _es.event_score + _rot_bonus))
+        _es = _dc_replace2(_es, event_score=_adj_score,
+                           reasons=_es.reasons + [f"rotation_{_rot_preview.rotation_state}→{_rot_bonus:+d}"])
+
+    # ── Compact per-component breakdown (always log for observability) ──
+    log.info(
+        "event_score_breakdown sym=%s score=%d consensus=%.0f cat=%.0f "
+        "impact=%.0f rsi=%.0f rvol=%.0f spread=%.0f regime=%.0f "
+        "sector=%.0f sector_name=%s sector_state=%s "
+        "playbook=%s regime_state=%s",
+        snap.symbol, _es.event_score,
+        _es.pts_consensus, _es.pts_category, _es.pts_impact,
+        _es.pts_rsi, _es.pts_rvol, _es.pts_spread, _es.pts_regime,
+        _es.pts_sector, _es.sector, _es.sector_state,
+        _es.playbook, _regime.regime,
+    )
+
+    if _es.event_score >= 30 or _sq.squeeze_score >= 30:
+        log.info(
+            "event_score symbol=%s es=%d playbook=%s risk=%s regime=%s "
+            "squeeze=%d(%s) consensus=%d impact=%d rsi=%s reasons=%s",
+            snap.symbol, _es.event_score, _es.playbook, _es.risk_mode,
+            _regime.regime, _sq.squeeze_score, _sq.squeeze_state,
+            _consensus, _best_impact,
+            f"{snap.rsi14:.1f}" if snap.rsi14 is not None else "n/a",
+            _es.reasons,
+        )
+
+    # Store EventScore on cache for strategy gating
+    sc.last_event_score = _es.event_score
+    sc.last_event_playbook = _es.playbook
+    sc.last_event_risk_mode = _es.risk_mode
+
+    # ── Volatility leadership compute ────────────────────────────────
+    _vl = _vol_compute_leader(snap.symbol, _regime.regime, _sa.sector_state)
+    sc.last_vol_score = _vl.leader_score
+    sc.last_vol_state = _vl.leader_state
+    if _vl.leader_score > 0:
+        log.info(
+            "volatility_leader sym=%s score=%d state=%s rvol=%.1f "
+            "atrx=%.1f spread=%.4f range=%.1f compress=%s reasons=%s",
+            snap.symbol, _vl.leader_score, _vl.leader_state,
+            _vl.rvol_ratio, _vl.atr_expansion_ratio,
+            _vl.spread_pct, _vl.range_expansion_pct,
+            _vl.compression_releasing, _vl.reasons,
+        )
+        # Feed volatility leader hit into industry rotation
+        _rotation_vol(snap.symbol)
+
+    # ── Industry rotation compute ────────────────────────────────────
+    _rot = _rotation_compute(snap.symbol)
+    sc.last_rotation_score = _rot.rotation_score
+    sc.last_rotation_state = _rot.rotation_state
+    if _rot.rotation_score > 0:
+        log.info(
+            "industry_rotation sym=%s sector=%s industry=%s state=%s "
+            "score=%d rs=%.2f breadth=%.0f heat=%.1f vol_leaders=%d n=%d",
+            snap.symbol, _rot.sector, _rot.industry, _rot.rotation_state,
+            _rot.rotation_score, _rot.relative_strength, _rot.breadth,
+            _rot.news_heat, _rot.vol_leaders, _rot.symbols_tracked,
+        )
+
+    # ── Playbook balance (observability) ─────────────────────────────
+    _pb_news = 0.35 if _consensus > 0 or _best_impact > 0 else 0.0
+    _pb_sector = 0.30 if _sa.sector_state in ("BULLISH", "HOT") else 0.10
+    _pb_vol = 0.35 if _vl.leader_state in ("TRIGGERED", "BUILDING") else 0.0
+    _pb_rotation = 0.20 if _rot.rotation_state in ("LEADING", "ROTATING_IN") else 0.0
+    _pb_total = _pb_news + _pb_sector + _pb_vol + _pb_rotation or 1.0
+    log.info(
+        "playbook_balance news=%.2f sector=%.2f vol=%.2f rotation=%.2f regime=%s",
+        _pb_news / _pb_total, _pb_sector / _pb_total, _pb_vol / _pb_total,
+        _pb_rotation / _pb_total, _regime.regime,
+    )
+
+    # ── Market Mode / Session Commander ────────────────────────────────
+    _session_now = get_us_equity_session()
+    _mm_d = None
+    if _MM_ENABLED:
+        _sec_sum = _get_sector_summary()
+        _sec_states = {k: v.get("state", "NEUTRAL") for k, v in _sec_sum.items()}
+        _sec_breadths = {k: v.get("breadth", 50.0) for k, v in _sec_sum.items()}
+        _rot_tops = _get_rotation_top(8)
+        _rot_leaders = sum(1 for r in _rot_tops if r.rotation_state in ("LEADING", "ROTATING_IN"))
+        _rot_top_score = max((r.rotation_score for r in _rot_tops), default=0)
+        _vol_tops = _get_vol_top_leaders(10)
+        _vol_triggered = sum(1 for v in _vol_tops if v.leader_state == "TRIGGERED")
+        _vol_top_score_mm = max((v.leader_score for v in _vol_tops), default=0)
+        _mm_d = _mm_compute(
+            regime=_regime.regime,
+            session=_session_now,
+            sector_states=_sec_states,
+            sector_breadths=_sec_breadths,
+            rotation_leaders=_rot_leaders,
+            rotation_top_score=_rot_top_score,
+            vol_triggered_count=_vol_triggered,
+            vol_top_score=_vol_top_score_mm,
+            avg_event_score=float(_es.event_score),
+            news_hot_count=1 if _es.event_score > 60 else 0,
+        )
+        log.info(
+            "market_mode_decision mode=%s conf=%.2f posture=%s breadth=%s "
+            "vol=%s rot=%s news=%s cap_mult=%.2f "
+            "weights=[n=%.2f r=%.2f v=%.2f m=%.2f] reasons=%s",
+            _mm_d.mode, _mm_d.confidence, _mm_d.risk_posture,
+            _mm_d.breadth_state, _mm_d.volatility_state,
+            _mm_d.rotation_state, _mm_d.news_state,
+            _mm_d.position_cap_mult,
+            _mm_d.recommended_news_weight, _mm_d.recommended_rotation_weight,
+            _mm_d.recommended_vol_weight, _mm_d.recommended_meanrev_weight,
+            _mm_d.reasons,
+        )
+
+    # ── Allocation Decision (once per eval cycle) ────────────────────
+    _alloc_d = _alloc_decide(regime=_regime.regime, session=_session_now, market_mode=_mm_d)
+    if _ALLOC_ENABLED:
+        log.info(
+            "allocation_decision regime=%s session=%s bias=%s posture=%s "
+            "weights=[n=%.2f r=%.2f v=%.2f m=%.2f] maxpos=%d reasons=%s",
+            _alloc_d.regime, _alloc_d.session_state, _alloc_d.market_bias,
+            _alloc_d.risk_posture,
+            _alloc_d.weight_news, _alloc_d.weight_rotation,
+            _alloc_d.weight_volatility, _alloc_d.weight_meanrevert,
+            _alloc_d.max_total_positions, _alloc_d.reasons,
+        )
+
+    # ── Self-Tuning: apply weight nudges to allocation ───────────────
+    if _TUNING_ENABLED and _ALLOC_ENABLED:
+        _tw_n = _tune_weight("news")
+        _tw_r = _tune_weight("rotation")
+        _tw_v = _tune_weight("volatility")
+        _tw_m = _tune_weight("meanrevert")
+        if any(x != 0 for x in (_tw_n, _tw_r, _tw_v, _tw_m)):
+            # AllocationDecision is frozen — log adjusted values as observability
+            _adj_n = max(0.0, min(1.0, _alloc_d.weight_news + _tw_n))
+            _adj_r = max(0.0, min(1.0, _alloc_d.weight_rotation + _tw_r))
+            _adj_v = max(0.0, min(1.0, _alloc_d.weight_volatility + _tw_v))
+            _adj_m = max(0.0, min(1.0, _alloc_d.weight_meanrevert + _tw_m))
+            log.info(
+                "tuned_bucket_weight news=%+.4f rot=%+.4f vol=%+.4f mr=%+.4f "
+                "adj=[n=%.2f r=%.2f v=%.2f m=%.2f]",
+                _tw_n, _tw_r, _tw_v, _tw_m,
+                _adj_n, _adj_r, _adj_v, _adj_m,
+            )
+
+    # ── Symbol priority / confluence scoring ─────────────────────────
+    _conf = _alloc_confluence(
+        symbol=snap.symbol,
+        event_score=_es.event_score,
+        sector_state=_sa.sector_state,
+        rotation_state=_rot.rotation_state,
+        rotation_score=_rot.rotation_score,
+        vol_state=_vl.leader_state,
+        vol_score=_vl.leader_score,
+        regime=_regime.regime,
+        spread_pct=_spread if _spread is not None else 0.0,
+        session=_session_now,
+        decision=_alloc_d,
+    )
+    sc.last_priority = _conf.priority_score
+    sc.last_confluence = _conf.confluence_score
+    sc.last_bucket = _conf.bucket
+    if _conf.priority_score > 0:
+        log.info(
+            "symbol_priority sym=%s priority=%.1f confluence=%.2f "
+            "bucket=%s matched=%s reasons=%s",
+            snap.symbol, _conf.priority_score, _conf.confluence_score,
+            _conf.bucket, _conf.matched_engines, _conf.reasons,
+        )
+    if len(_conf.matched_engines) >= 2:
+        log.info(
+            "confluence_hit sym=%s matched=%s bonus=%.2f priority=%.1f",
+            snap.symbol, _conf.matched_engines,
+            _conf.confluence_score, _conf.priority_score,
+        )
+    if _mm_d is not None and _conf.priority_score > 0:
+        _mode_fit = "HIGH" if _conf.priority_score >= 50 else ("MED" if _conf.priority_score >= 25 else "LOW")
+        log.info(
+            "symbol_mode_fit sym=%s mode=%s fit=%s priority=%.1f bucket=%s",
+            snap.symbol, _mm_d.mode, _mode_fit,
+            _conf.priority_score, _conf.bucket,
+        )
+
+    # ── Scorecard priority bias ──────────────────────────────────────
+    if _SC_ENABLED and _conf.bucket != "none":
+        _sc_bias = _sc_priority_bias(_conf.bucket)
+        if _sc_bias != 0.0:
+            _conf_priority_adj = _conf.priority_score + _sc_bias
+            log.info(
+                "scorecard_fit sym=%s bucket=%s bias=%+.1f priority=%.1f→%.1f",
+                snap.symbol, _conf.bucket, _sc_bias,
+                _conf.priority_score, _conf_priority_adj,
+            )
+
+    # ── Self-Tuning: priority bias nudge ─────────────────────────────
+    if _TUNING_ENABLED and _conf.bucket != "none":
+        _tp_nudge = _tune_priority(_conf.bucket)
+        if _tp_nudge != 0.0:
+            _adj_pri = max(0.0, _conf.priority_score + _tp_nudge)
+            log.info(
+                "tuned_priority_bias sym=%s bucket=%s nudge=%+.2f priority=%.1f→%.1f",
+                snap.symbol, _conf.bucket, _tp_nudge,
+                _conf.priority_score, _adj_pri,
+            )
+
+    # ── Self-Tuning: event threshold nudge ───────────────────────────
+    if _TUNING_ENABLED and _conf.bucket != "none":
+        _tt_nudge = _tune_threshold(_conf.bucket)
+        if _tt_nudge != 0.0:
+            log.info(
+                "tuned_threshold sym=%s bucket=%s nudge=%+.1f",
+                snap.symbol, _conf.bucket, _tt_nudge,
+            )
+
+    # ── Composite Intelligence Layer ─────────────────────────────────
+    if _COMPOSITE_ENABLED:
+        _symbol_sc = float(_es.event_score)
+        _comp = _compute_composite(
+            symbol=snap.symbol,
+            symbol_score=_symbol_sc,
+            market_mode_decision=_mm_d,
+        )
+        sc.last_composite_score = _comp.composite_score
+        sc.last_sector_score = _comp.sector_score
+        sc.last_industry_score = _comp.industry_score
+        sc.last_market_score = _comp.market_score
+        if _comp.composite_score > 30:
+            log.info(
+                "composite_score sym=%s composite=%.1f symbol=%.1f "
+                "sector=%.1f industry=%.1f market=%.1f "
+                "sector_name=%s industry_name=%s",
+                snap.symbol, _comp.composite_score, _comp.symbol_score,
+                _comp.sector_score, _comp.industry_score, _comp.market_score,
+                _comp.sector, _comp.industry,
+            )
+
+    # ── Phase B: Scan priority bonus ─────────────────────────────────
+    if sc.scan_priority == _SCAN_HIGH and _SCAN_PRIORITY_BONUS > 0:
+        sc.last_composite_score = sc.last_composite_score + _SCAN_PRIORITY_BONUS
+
+    # ── I: Session phase awareness ──────────────────────────────────
+    global _last_session_log_ts
+    _phase = _get_session_phase()
+    if now - _last_session_log_ts >= 60.0:
+        _last_session_log_ts = now
+        log.info("session_state=%s", _phase)
+
+        # ── Armed-not-triggered observability summary (per minute) ──
+        log.info(
+            "obs_gates event_gate=%d/%d consensus_bypass=%d/%d "
+            "spread_gate=%d/%d regime_gate=%d/%d",
+            _obs_event_gate_fired, _obs_event_gate_armed,
+            _obs_consensus_bypass_fired, _obs_consensus_bypass_armed,
+            _obs_spread_gate_fired, _obs_spread_gate_armed,
+            _obs_regime_gate_fired, _obs_regime_gate_armed,
+        )
+        _obs_event_gate_armed = _obs_event_gate_fired = 0
+        _obs_consensus_bypass_armed = _obs_consensus_bypass_fired = 0
+        _obs_spread_gate_armed = _obs_spread_gate_fired = 0
+        _obs_regime_gate_armed = _obs_regime_gate_fired = 0
+        _obs_last_reset_ts = now
+
+        # ── Blocked strategy summary (per minute) ───────────────────
+        if _blocked_counts or _blocked_reasons:
+            # Format: DEV=120 RSI=120 CONS=120
+            strat_parts = " ".join(f"{k}={v}" for k, v in sorted(_blocked_counts.items()))
+            # Top reasons: low_event_score=340, regime_gate=80, high_spread=20
+            top_reasons = sorted(_blocked_reasons.items(), key=lambda x: -x[1])[:5]
+            reason_str = ", ".join(f"{k}={v}" for k, v in top_reasons)
+            log.info(
+                "blocked_summary %s top_reasons=[%s]",
+                strat_parts, reason_str,
+            )
+            _blocked_counts.clear()
+            _blocked_reasons.clear()
+
+    # ── D: Regime gate helper (per-strategy) ────────────────────────
+    def _gated(strat: str) -> bool:
+        """Check both event-score gate AND regime gate.  Log skip."""
+        if not _check_event_gate(snap.symbol, strat, sc.last_event_score,
+                                 {"DEV_MOMENTUM": _ES_MIN_DEV, "mean_revert_rsi": _ES_MIN_RSI,
+                                  "consensus_news": _ES_MIN_CONSENSUS,
+                                  "volatility_breakout": _ES_MIN_VOL}.get(strat, 0),
+                                 _es.reasons):
+            return False
+        if not _regime_allows(strat, _regime.regime):
+            log.debug(
+                "regime_gate_skip regime=%s setup=%s symbol=%s",
+                _regime.regime, strat, snap.symbol,
+            )
+            return False
+        return True
+
+    # ── I: Session-based strategy restrictions ──────────────────────
+    _allow_momentum = True
+    _allow_rsi = True
+    _allow_consensus = _CONSENSUS_TRADE_ENABLED
+    if _SESSION_AWARE:
+        if _phase == "PREMARKET":
+            _allow_momentum = False
+            _allow_rsi = False  # consensus/news only
+        elif _phase == "MIDDAY" and sc.last_event_score < _MIDDAY_MIN_EVENT:
+            _allow_momentum = False  # disable momentum unless high-event
+        # OPEN: handled by adaptive spread widening in _adaptive_spread_limit
+
     # ── Strategy A: DevMomentum (PAPER/local dev) ───────────────────
-    if _DEV_STRATEGY:
-        _evaluate_dev_momentum(snap, sc, now)
+    if _DEV_STRATEGY and _allow_momentum:
+        if _gated("DEV_MOMENTUM"):
+            _evaluate_dev_momentum(snap, sc, now)
 
     # Re-check cooldown (DevMomentum may have just fired)
     if (time.time() - sc.last_intent_ts) < _COOLDOWN_S:
@@ -1728,7 +2612,32 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
         return
 
     # ── Strategy B: RSI mean-reversion (always available) ───────────
-    _evaluate_rsi(snap, sc, now)
+    if _allow_rsi and _gated("mean_revert_rsi"):
+        _evaluate_rsi(snap, sc, now)
+
+    # Re-check cooldown (RSI may have just fired)
+    if (time.time() - sc.last_intent_ts) < _COOLDOWN_S:
+        return
+    if not _hourly_cap_ok(snap.symbol, time.time()):
+        return
+
+    # ── Strategy C: Consensus news (fires without RSI) ──────────────
+    if _allow_consensus:
+        _obs_consensus_bypass_armed += 1
+        if _gated("consensus_news"):
+            _obs_consensus_bypass_fired += 1
+            _evaluate_consensus_news(snap, sc, now)
+
+    # Re-check cooldown (Consensus may have just fired)
+    if (time.time() - sc.last_intent_ts) < _COOLDOWN_S:
+        return
+    if not _hourly_cap_ok(snap.symbol, time.time()):
+        return
+
+    # ── Strategy D: Volatility breakout (stocks only) ───────────────
+    if _VOL_ENABLED and _vl.leader_state == "TRIGGERED":
+        if _gated("volatility_breakout"):
+            _evaluate_volatility_breakout(snap, sc, now, _vl)
 
 
 def _evaluate_dev_momentum(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
@@ -1747,11 +2656,20 @@ def _evaluate_dev_momentum(snap: MarketSnapshot, sc: SymbolCache, now: float) ->
     if not (c3 > c2 > c1 > 0):
         return
 
-    # Spread check
+    # Spread check (F: adaptive)
     if snap.bid <= 0 or snap.ask <= 0:
         return
     spread_pct = (snap.ask - snap.bid) / snap.last
-    if spread_pct > _SPREAD_MAX_PCT:
+    _spread_limit = _adaptive_spread_limit(snap, _get_session_phase())
+    global _obs_spread_gate_armed, _obs_spread_gate_fired
+    _obs_spread_gate_armed += 1
+    if spread_pct > _spread_limit:
+        _obs_spread_gate_fired += 1
+        _blocked_reasons["high_spread"] = _blocked_reasons.get("high_spread", 0) + 1
+        log.debug(
+            "spread_gate_skip symbol=%s spread=%.4f atr_limit=%.4f",
+            snap.symbol, spread_pct, _spread_limit,
+        )
         return
 
     reason_codes = [
@@ -1759,11 +2677,32 @@ def _evaluate_dev_momentum(snap: MarketSnapshot, sc: SymbolCache, now: float) ->
         f"spread={spread_pct:.4f}",
     ]
 
+    conf = 0.25
+    consensus_n = _recent_consensus_count(sc)
+    # Force-path override: consensus provider count
+    if _TEST_FORCE_CONSENSUS > 0:
+        consensus_n = _TEST_FORCE_CONSENSUS
+    if consensus_n >= 2:
+        conf = min(1.0, conf + _CONFIDENCE_CONSENSUS_BOOST)
+        reason_codes.append(f"consensus={consensus_n}")
+
+    if consensus_n >= 2:
+        log.info(
+            "CONSENSUS_SIGNAL symbol=%s confidence=%.2f providers=%d",
+            snap.symbol, conf, consensus_n,
+        )
+
+    # EventScore soft penalty
+    conf, _penalized = _apply_event_soft_penalty(conf, sc.last_event_score, _ES_MIN_DEV)
+    if _penalized:
+        reason_codes.append("event_gate_soft")
+    reason_codes.append(f"event_score={sc.last_event_score}")
+
     intent = TradeIntent(
         symbol=snap.symbol,
         setup_type="DEV_MOMENTUM",
         direction="LONG",
-        confidence=0.25,
+        confidence=conf,
         entry_zone_low=round(snap.bid, 2),
         entry_zone_high=round(snap.ask, 2),
         invalidation=round(snap.last * 0.995, 2),
@@ -1789,11 +2728,19 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     if snap.vwap <= 0 or snap.last <= snap.vwap:
         return
 
-    # ── Condition 3: spread within tolerance ────────────────────────
+    # ── Condition 3: spread within tolerance (F: adaptive) ────────────
     if snap.bid <= 0 or snap.ask <= 0:
         return
     spread_pct = (snap.ask - snap.bid) / snap.last
-    if spread_pct > _SPREAD_MAX_PCT:
+    _spread_limit = _adaptive_spread_limit(snap, _get_session_phase())
+    global _obs_spread_gate_armed, _obs_spread_gate_fired
+    _obs_spread_gate_armed += 1
+    if spread_pct > _spread_limit:
+        _obs_spread_gate_fired += 1
+        log.debug(
+            "spread_gate_skip symbol=%s spread=%.4f atr_limit=%.4f strat=mean_revert_rsi",
+            symbol, spread_pct, _spread_limit,
+        )
         return
 
     # ── All conditions met — build confidence ───────────────────────
@@ -1803,6 +2750,11 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     sentiment = _recent_news_sentiment(sc)
     if sentiment is not None and sentiment > 0:
         confidence = min(1.0, confidence + _CONFIDENCE_NEWS_BOOST * sentiment)
+
+    # Boost for cross-provider consensus
+    consensus_n = _recent_consensus_count(sc)
+    if consensus_n >= 2:
+        confidence = min(1.0, confidence + _CONFIDENCE_CONSENSUS_BOOST)
 
     # ── Build entry zone & invalidation from ATR ────────────────────
     atr = snap.atr if snap.atr > 0 else abs(snap.last - snap.vwap)
@@ -1818,6 +2770,20 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     ]
     if sentiment is not None:
         reason_codes.append(f"news_sentiment={sentiment:.2f}")
+    if consensus_n >= 2:
+        reason_codes.append(f"consensus={consensus_n}")
+
+    if consensus_n >= 2:
+        log.info(
+            "CONSENSUS_SIGNAL symbol=%s confidence=%.2f providers=%d",
+            symbol, confidence, consensus_n,
+        )
+
+    # EventScore soft penalty
+    confidence, _penalized = _apply_event_soft_penalty(confidence, sc.last_event_score, _ES_MIN_RSI)
+    if _penalized:
+        reason_codes.append("event_gate_soft")
+    reason_codes.append(f"event_score={sc.last_event_score}")
 
     intent = TradeIntent(
         symbol=symbol,
@@ -1833,13 +2799,191 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     _emit_intent(intent, sc, snap, now)
 
 
+# ── Strategy C: Consensus-driven news trade ─────────────────────────
+
+def _evaluate_consensus_news(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
+    """Fire a trade when multi-provider consensus is strong, even without RSI.
+
+    Conditions:
+        1. CONSENSUS:N tag with N >= ``_CONSENSUS_MIN_PROVIDERS``
+        2. ``impact_score`` >= ``_CONSENSUS_MIN_IMPACT``
+        3. Valid spread
+    This allows the system to react to cross-source news events immediately
+    on startup (before 14 candles of RSI history accumulate).
+    """
+    symbol = snap.symbol
+
+    consensus_n = _recent_consensus_count(sc)
+    # Force-path override: consensus provider count
+    if _TEST_FORCE_CONSENSUS > 0:
+        consensus_n = _TEST_FORCE_CONSENSUS
+    if consensus_n < _CONSENSUS_MIN_PROVIDERS:
+        _blocked_reasons["no_consensus"] = _blocked_reasons.get("no_consensus", 0) + 1
+        log.debug(
+            "consensus_skip symbol=%s reason=insufficient_providers providers=%d min=%d",
+            symbol, consensus_n, _CONSENSUS_MIN_PROVIDERS,
+        )
+        return
+
+    # Best impact score from recent consensus news
+    best_impact = 0
+    cutoff = now - _NEWS_RECENCY_S
+    for n in reversed(sc.news):
+        ts = n.ts.timestamp() if hasattr(n.ts, "timestamp") else 0
+        if ts < cutoff:
+            break
+        imp = getattr(n, "impact_score", 0) or 0
+        if imp > best_impact:
+            best_impact = imp
+    if best_impact < _CONSENSUS_MIN_IMPACT:
+        log.debug(
+            "consensus_skip symbol=%s reason=low_impact best_impact=%d min=%d",
+            symbol, best_impact, _CONSENSUS_MIN_IMPACT,
+        )
+        return
+
+    # Spread guard (F: adaptive)
+    if snap.bid <= 0 or snap.ask <= 0:
+        log.debug("consensus_skip symbol=%s reason=no_bid_ask", symbol)
+        return
+    spread_pct = (snap.ask - snap.bid) / snap.last
+    _spread_limit = _adaptive_spread_limit(snap, _get_session_phase())
+    global _obs_spread_gate_armed, _obs_spread_gate_fired
+    _obs_spread_gate_armed += 1
+    if spread_pct > _spread_limit:
+        _obs_spread_gate_fired += 1
+        log.debug(
+            "spread_gate_skip symbol=%s spread=%.4f atr_limit=%.4f strat=consensus_news",
+            symbol, spread_pct, _spread_limit,
+        )
+        return
+
+    # Confidence: conservative base + consensus boost (cap at 0.85)
+    confidence = min(0.85, 0.50 + _CONFIDENCE_CONSENSUS_BOOST + 0.05 * (consensus_n - 2))
+
+    # Entry zone: tight around mid
+    mid = round((snap.bid + snap.ask) / 2.0, 2)
+    half = round(max(0.01, (snap.ask - snap.bid) * 0.5), 2)
+    entry_zone_low = round(mid - half, 2)
+    entry_zone_high = round(mid + half, 2)
+    invalidation = round(snap.last * 0.99, 2)  # 1% stop — conservative
+
+    reason_codes = [
+        "consensus_only",
+        f"consensus={consensus_n}",
+        f"impact={best_impact}",
+        f"spread={spread_pct:.4f}",
+    ]
+
+    log.info(
+        "CONSENSUS_SIGNAL symbol=%s confidence=%.2f providers=%d impact=%d",
+        symbol, confidence, consensus_n, best_impact,
+    )
+
+    # EventScore soft penalty
+    confidence, _penalized = _apply_event_soft_penalty(confidence, sc.last_event_score, _ES_MIN_CONSENSUS)
+    if _penalized:
+        reason_codes.append("event_gate_soft")
+    reason_codes.append(f"event_score={sc.last_event_score}")
+
+    intent = TradeIntent(
+        symbol=symbol,
+        setup_type="consensus_news",
+        direction="LONG",
+        confidence=round(confidence, 3),
+        entry_zone_low=entry_zone_low,
+        entry_zone_high=entry_zone_high,
+        invalidation=invalidation,
+        reason_codes=reason_codes,
+    )
+
+    _emit_intent(intent, sc, snap, now)
+
+
+# ── Strategy D: Volatility breakout ─────────────────────────────────
+
+def _evaluate_volatility_breakout(
+    snap: MarketSnapshot, sc: SymbolCache, now: float, vl,
+) -> None:
+    """Volatility breakout: TRIGGERED leader with good spread → LONG intent.
+
+    Stocks only.  Requires leader_state == TRIGGERED (checked by caller).
+    """
+    symbol = snap.symbol
+
+    # Spread guard
+    if snap.bid <= 0 or snap.ask <= 0:
+        return
+    spread_pct = (snap.ask - snap.bid) / snap.last
+    _spread_limit = _adaptive_spread_limit(snap, _get_session_phase())
+    if spread_pct > _spread_limit:
+        log.debug(
+            "volatility_gate_skip symbol=%s reason=high_spread spread=%.4f limit=%.4f",
+            symbol, spread_pct, _spread_limit,
+        )
+        return
+
+    # Confidence: base + volatility boost (cap at 0.85)
+    confidence = min(0.85, _CONFIDENCE_BASE + vl.confidence_boost)
+
+    # Entry zone: tight around mid
+    mid = round((snap.bid + snap.ask) / 2.0, 2)
+    half = round(max(0.01, (snap.ask - snap.bid) * 0.5), 2)
+    entry_zone_low = round(mid - half, 2)
+    entry_zone_high = round(mid + half, 2)
+    invalidation = round(snap.last * (1.0 - 0.01 * max(1.0, vl.atr_expansion_ratio)), 2)
+
+    reason_codes = [
+        "volatility_breakout",
+        f"vol_score={vl.leader_score}",
+        f"vol_state={vl.leader_state}",
+        f"rvol={vl.rvol_ratio:.1f}",
+        f"atrx={vl.atr_expansion_ratio:.1f}",
+        f"spread={spread_pct:.4f}",
+    ]
+    if vl.compression_releasing:
+        reason_codes.append("squeeze_release")
+
+    log.info(
+        "VOLATILITY_SIGNAL symbol=%s confidence=%.2f score=%d state=%s "
+        "rvol=%.1f atrx=%.1f",
+        symbol, confidence, vl.leader_score, vl.leader_state,
+        vl.rvol_ratio, vl.atr_expansion_ratio,
+    )
+
+    # EventScore soft penalty
+    confidence, _penalized = _apply_event_soft_penalty(confidence, sc.last_event_score, _ES_MIN_VOL)
+    if _penalized:
+        reason_codes.append("event_gate_soft")
+    reason_codes.append(f"event_score={sc.last_event_score}")
+
+    intent = TradeIntent(
+        symbol=symbol,
+        setup_type="volatility_breakout",
+        direction="LONG",
+        confidence=round(confidence, 3),
+        entry_zone_low=entry_zone_low,
+        entry_zone_high=entry_zone_high,
+        invalidation=invalidation,
+        reason_codes=reason_codes,
+    )
+
+    _emit_intent(intent, sc, snap, now)
+
+
 # ── Forced dev intent (pipeline E2E testing) ────────────────────────
+
+# Force-sector symbol selection
+_TEST_FORCE_SECTOR = os.environ.get("TL_TEST_FORCE_SECTOR", "")
 
 def _maybe_force_intent(cache_snapshot: Dict[str, Optional[MarketSnapshot]]) -> None:
     """Emit a synthetic TradeIntent for the first cached symbol.
 
     Only called when ``SIGNAL_FORCE_INTENT=true``.  Respects a 60 s
     cooldown so the downstream pipeline isn't flooded.
+
+    When ``TL_TEST_FORCE_SECTOR`` is set, strongly prefers a symbol from
+    that sector so the forced intent exercises the sector pipeline.
     """
     global _last_forced_intent_ts, _intents_emitted
 
@@ -1847,35 +2991,66 @@ def _maybe_force_intent(cache_snapshot: Dict[str, Optional[MarketSnapshot]]) -> 
     if (now - _last_forced_intent_ts) < _FORCE_INTENT_INTERVAL_S:
         return
 
-    # Pick the first symbol that has at least one snapshot with a price
-    for sym in sorted(cache_snapshot):
-        snap = cache_snapshot[sym]
-        if snap is None or snap.last <= 0:
-            continue
+    # ── Symbol selection: prefer forced-sector match ─────────────────
+    chosen_sym: Optional[str] = None
+    fallback = False
 
-        last = snap.last
-        intent = TradeIntent(
-            symbol=sym,
-            setup_type="FORCED_DEV_TEST",
-            direction="LONG",
-            confidence=0.2,
-            entry_zone_low=round(last * 0.999, 2),
-            entry_zone_high=round(last * 1.001, 2),
-            invalidation=round(last * 0.99, 2),
-            reason_codes=["forced_dev_test"],
-        )
+    if _TEST_FORCE_SECTOR:
+        from src.universe.sector_mapper import get_sector_symbols
+        sector_syms = set(get_sector_symbols(_TEST_FORCE_SECTOR))
+        # Pick the first sector-matching symbol that has an active snapshot
+        for sym in sorted(cache_snapshot):
+            if sym not in sector_syms:
+                continue
+            snap = cache_snapshot[sym]
+            if snap is not None and snap.last > 0:
+                chosen_sym = sym
+                break
 
-        log.warning(
-            "FORCED dev intent  symbol=%s  last=%.2f  entry=[%.2f,%.2f]",
-            sym, last, intent.entry_zone_low, intent.entry_zone_high,
-        )
+    if chosen_sym is None:
+        fallback = _TEST_FORCE_SECTOR != ""
+        # Fall back to first symbol with a valid price
+        for sym in sorted(cache_snapshot):
+            snap = cache_snapshot[sym]
+            if snap is not None and snap.last > 0:
+                chosen_sym = sym
+                break
 
-        _bus.publish(TRADE_INTENT, intent)
+    if chosen_sym is None:
+        return
 
-        with _lock:
-            _last_forced_intent_ts = now
-            _intents_emitted += 1
-        return  # only one per cycle
+    _chosen_sp = _classify_symbol(chosen_sym)
+    log.info(
+        "forced_intent_symbol symbol=%s sector=%s reason=%s fallback=%s",
+        chosen_sym, _chosen_sp.sector,
+        "force_sector_match" if not fallback else "no_sector_match",
+        str(fallback).lower(),
+    )
+
+    snap = cache_snapshot[chosen_sym]
+    last = snap.last
+    _forced_es = _TEST_FORCE_EVENT_SCORE or 55
+    intent = TradeIntent(
+        symbol=chosen_sym,
+        setup_type="FORCED_DEV_TEST",
+        direction="LONG",
+        confidence=0.2,
+        entry_zone_low=round(last * 0.999, 2),
+        entry_zone_high=round(last * 1.001, 2),
+        invalidation=round(last * 0.99, 2),
+        reason_codes=["forced_dev_test", f"event_score={_forced_es}"],
+    )
+
+    log.warning(
+        "FORCED dev intent  symbol=%s  last=%.2f  entry=[%.2f,%.2f]",
+        chosen_sym, last, intent.entry_zone_low, intent.entry_zone_high,
+    )
+
+    _bus.publish(TRADE_INTENT, intent)
+
+    with _lock:
+        _last_forced_intent_ts = now
+        _intents_emitted += 1
 
 
 # ── Bus connection ──────────────────────────────────────────────────
@@ -1898,11 +3073,76 @@ def _connect_bus():
         return None
 
 
+# ── Top-10 candidate board (printed every 60 s) ─────────────────────
+
+_CANDIDATE_BOARD_TOP_N = 10
+_CANDIDATE_BOARD_INTERVAL_S = 60.0
+
+
+def _print_candidate_board() -> None:
+    """Log a ranked table of the top candidates for quick tuning visibility.
+
+    For each symbol: event_score, consensus, spread, regime, squeeze, gate status.
+    """
+    regime = _get_regime()
+    entries = []
+
+    with _lock:
+        for sym, sc in _cache.items():
+            if not sc.snapshots:
+                continue
+            snap = sc.snapshots[-1]
+            # Spread
+            spread_pct = 0.0
+            if snap.bid > 0 and snap.ask > 0 and snap.last > 0:
+                spread_pct = (snap.ask - snap.bid) / snap.last
+
+            # Consensus
+            cons = _recent_consensus_count(sc)
+
+            # Squeeze
+            sq = _get_squeeze(sym)
+
+            # Gate status
+            gates = []
+            es = sc.last_event_score
+            if es < _ES_MIN_DEV:
+                gates.append("event_gate")
+            if not regime.allows_strategy("momentum"):
+                gates.append("regime_gate")
+            if spread_pct > _SPREAD_MAX:
+                gates.append("spread_gate")
+            gate_str = ",".join(gates) if gates else "CLEAR"
+
+            entries.append((
+                sym, es, cons,
+                spread_pct, regime.regime,
+                sq.squeeze_score, gate_str,
+                snap.last,
+            ))
+
+    # Sort by event_score desc
+    entries.sort(key=lambda x: -x[1])
+    top = entries[:_CANDIDATE_BOARD_TOP_N]
+
+    if not top:
+        return
+
+    log.info("candidate_board:")
+    for i, (sym, es, cons, spread, reg, sqz, gate, price) in enumerate(top, 1):
+        log.info(
+            "  %2d %-5s score=%d cons=%d spread=%.2f%% regime=%s squeeze=%d "
+            "blocked=%s last=%.2f",
+            i, sym, es, cons,
+            spread * 100, reg, sqz, gate, price,
+        )
+
+
 # ── Main loop ────────────────────────────────────────────────────────
 
 def main() -> None:
     """Entry-point for the signal arm."""
-    global _bus
+    global _bus, _last_rotation_decision_ts
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -1918,10 +3158,129 @@ def main() -> None:
         _MAX_INTENTS_PER_SYMBOL_PER_HOUR,
     )
 
+    # ── Force-path calibration banner ─────────────────────────────
+    _force_regime = os.environ.get("TL_TEST_FORCE_REGIME", "")
+    # ── Volatility engine banner ──────────────────────────────────
+    from src.signals.volatility_leaders import (
+        _FORCE_SCORE as _vf_score, _FORCE_STATE as _vf_state,
+        _FORCE_SYMBOL as _vf_sym,
+    )
+    if _VOL_ENABLED:
+        log.info(
+            "VOLATILITY_ENGINE enabled  min_score=%d  force_score=%d  "
+            "force_state=%s  force_symbol=%s",
+            _ES_MIN_VOL, _vf_score, _vf_state or "(natural)",
+            _vf_sym or "(all)",
+        )
+
+    # ── Industry rotation engine banner ───────────────────────────
+    if _ROTATION_ENABLED:
+        from src.signals.industry_rotation import (
+            _FORCE_INDUSTRY as _rf_ind,
+            _FORCE_ROTATION_STATE as _rf_state,
+            _FORCE_ROTATION_SCORE as _rf_score,
+        )
+        log.info(
+            "ROTATION_ENGINE enabled  force_industry=%s  "
+            "force_state=%s  force_score=%d",
+            _rf_ind or "(natural)",
+            _rf_state or "(natural)",
+            _rf_score,
+        )
+
+    # ── Allocation engine banner ──────────────────────────────────
+    if _ALLOC_ENABLED:
+        from src.signals.allocation_engine import (
+            _FORCE_MODE as _af_mode,
+            _F_NEWS as _af_news, _F_ROTATION as _af_rot,
+            _F_VOL as _af_vol, _F_MEANREV as _af_mr,
+            _F_MAX_POS as _af_maxpos,
+        )
+        log.info(
+            "ALLOCATION_ENGINE enabled  force_mode=%s  "
+            "force_news=%.2f  force_rot=%.2f  "
+            "force_vol=%.2f  force_mr=%.2f  force_maxpos=%d",
+            _af_mode or "(natural)",
+            _af_news, _af_rot, _af_vol, _af_mr, _af_maxpos,
+        )
+
+    # ── Market Mode / Session Commander banner ────────────────────
+    if _MM_ENABLED:
+        from src.signals.market_mode import (
+            _FORCE_MODE as _mf_mode,
+            _FORCE_CONFIDENCE as _mf_conf,
+            _FORCE_NEWS as _mf_news, _FORCE_ROTATION as _mf_rot,
+            _FORCE_VOL as _mf_vol, _FORCE_MEANREV as _mf_mr,
+            _FORCE_CAP_MULT as _mf_cap,
+        )
+        log.info(
+            "MARKET_MODE_ENGINE enabled  force_mode=%s  "
+            "force_conf=%.2f  force_news=%.2f  force_rot=%.2f  "
+            "force_vol=%.2f  force_mr=%.2f  force_cap=%.2f",
+            _mf_mode or "(natural)", _mf_conf,
+            _mf_news, _mf_rot, _mf_vol, _mf_mr, _mf_cap,
+        )
+
+    if _SC_ENABLED:
+        from src.analysis.playbook_scorecard import (
+            _FORCE_PLAYBOOK as _scf_pb,
+            _FORCE_SCORE as _scf_score,
+        )
+        log.info(
+            "SCORECARD_ENGINE enabled  force_playbook=%s  force_score=%.2f",
+            _scf_pb or "(natural)", _scf_score,
+        )
+
+    # ── Exit Intelligence Engine banner ───────────────────────────
+    try:
+        from src.risk.exit_intelligence import (
+            EXIT_ENABLED as _exit_on,
+            _FORCE_PLAYBOOK as _ef_pb,
+            _FORCE_MODE as _ef_mode,
+            _FORCE_ACTION as _ef_action,
+        )
+        if _exit_on:
+            log.info(
+                "EXIT_ENGINE enabled  force_playbook=%s  force_mode=%s  force_action=%s",
+                _ef_pb or "(natural)", _ef_mode or "(natural)",
+                _ef_action or "(natural)",
+            )
+    except Exception:
+        pass
+
+    # ── PnL Attribution + Self-Tuning Engine banner ───────────────
+    if _ATTRIB_ENABLED:
+        log.info("ATTRIBUTION_ENGINE enabled")
+    if _TUNING_ENABLED:
+        from src.analysis.self_tuning import (
+            _FORCE_BUCKET as _tun_fb,
+            _FORCE_EDGE as _tun_fe,
+            _FORCE_SAMPLE as _tun_fs,
+            _FORCE_WEIGHT_DELTA as _tun_fw,
+            _FORCE_THRESHOLD_DELTA as _tun_ft,
+        )
+        log.info(
+            "TUNING_ENGINE enabled  force_bucket=%s  force_edge=%s  "
+            "force_sample=%d  force_weight_delta=%.3f  force_threshold_delta=%.1f",
+            _tun_fb or "(natural)", _tun_fe or "(natural)",
+            _tun_fs, _tun_fw, _tun_ft,
+        )
+
+    if _force_regime or _TEST_FORCE_EVENT_SCORE or _TEST_FORCE_CONSENSUS or _TEST_FORCE_SPREAD_PCT:
+        log.warning(
+            "FORCE-PATH MODE ACTIVE  regime=%s  event_score=%d  "
+            "consensus=%d  spread_pct=%.4f",
+            _force_regime or "(natural)",
+            _TEST_FORCE_EVENT_SCORE,
+            _TEST_FORCE_CONSENSUS,
+            _TEST_FORCE_SPREAD_PCT,
+        )
+
     _bus = _connect_bus()
 
     last_off_hours_publish_ts: float = 0.0
     last_premarket_publish_ts: float = 0.0
+    last_candidate_board_ts: float = 0.0
 
     tick = 0
     while _running:
@@ -1946,11 +3305,43 @@ def main() -> None:
             }
 
         # ── Detailed heartbeat log ───────────────────────────────────
+        _regime = _get_regime()
+        _rot_hb = ""
+        if _ROTATION_ENABLED:
+            _rot_hb = f"  {_rotation_summary()}"
+        _alloc_hb = ""
+        if _ALLOC_ENABLED:
+            _alloc_hb = f"  {_alloc_summary()}"
+        _mm_hb = ""
+        if _MM_ENABLED:
+            _mm_hb = f"  {_mm_summary()}"
+        _sc_hb = ""
+        if _SC_ENABLED:
+            _sc_snap = _sc_summary()
+            _sc_hb = f"  SC[closed={_sc_snap.get('total_closed', 0)} open={_sc_snap.get('open_trades', 0)} conf={_sc_snap.get('overall_confidence', 1.0):.2f}]"
+        _tune_hb = ""
+        if _TUNING_ENABLED:
+            _ts = _tune_snapshot()
+            _tune_hb = f"  TUNE[ovr={_ts.active_overrides}]"
+            if _ts.active_overrides > 0:
+                log.info(
+                    "tuning_override_applied active=%d bucket=%s priority=%s threshold=%s cap=%s qty=%s",
+                    _ts.active_overrides,
+                    {k: round(v, 4) for k, v in _ts.bucket_nudges.items() if v != 0},
+                    {k: round(v, 2) for k, v in _ts.priority_nudges.items() if v != 0},
+                    {k: round(v, 1) for k, v in _ts.threshold_nudges.items() if v != 0},
+                    {k: round(v, 4) for k, v in _ts.cap_mult_nudges.items() if v != 0},
+                    {k: round(v, 4) for k, v in _ts.qty_mult_nudges.items() if v != 0},
+                )
         log.info(
             "heartbeat  tick=%d  symbols=%d  intents_emitted=%d  "
-            "snapshots_rx=%d  news_rx=%d",
+            "snapshots_rx=%d  news_rx=%d  regime=%s(%.2f)%s%s%s%s%s",
             tick, syms, emitted, snaps_rx, news_rx,
+            _regime.regime, _regime.confidence, _rot_hb, _alloc_hb, _mm_hb, _sc_hb, _tune_hb,
         )
+        _active_ai = _agent_all_active()
+        if _active_ai:
+            log.info("agent_intel active=%d symbols=%s", len(_active_ai), list(_active_ai.keys()))
         for sym, snap in sorted(cache_snapshot.items()):
             if snap is not None:
                 rsi_str = f"{snap.rsi14:.1f}" if snap.rsi14 is not None else "n/a"
@@ -1959,8 +3350,73 @@ def main() -> None:
                     sym, snap.last, snap.bid, snap.ask, snap.vwap, rsi_str,
                 )
 
-        # ── OFF_HOURS board publish (every 30 s) ────────────────────
+        # ── Phase B: Dynamic Universe + Rotation Selector ────────────
         now_loop = time.time()
+        try:
+          if now_loop - _last_rotation_decision_ts >= _ROTATION_DECISION_INTERVAL_S:
+            _last_rotation_decision_ts = now_loop
+            _sec_scores_b: Dict[str, float] = {}
+            _ind_scores_b: Dict[str, float] = {}
+            if _ROTATION_SEL_ENABLED or _DYN_UNIVERSE_ENABLED:
+                from src.universe.sector_mapper import get_all_sectors as _all_sec, get_all_industries as _all_ind
+                for _s in _all_sec():
+                    _sec_scores_b[_s] = _get_sector_score(_s)
+                for _i in _all_ind():
+                    _ind_scores_b[_i] = _get_industry_score(_i)
+
+            if _ROTATION_SEL_ENABLED and _sec_scores_b:
+                _rot_d = _compute_rotation_decision(
+                    sector_scores=_sec_scores_b,
+                    industry_scores=_ind_scores_b,
+                    market_mode=_regime.regime,
+                )
+                _top_sec_str = ", ".join(f"{s}:{sc:.0f}" for s, sc in _rot_d.top_sectors[:5])
+                _top_ind_str = ", ".join(f"{i}:{sc:.0f}" for i, sc in _rot_d.top_industries[:5])
+                log.info(
+                    "sector_rotation_decision top_sectors=[%s] "
+                    "rotating_in=%s rotating_out=%s "
+                    "top_industries=[%s]",
+                    _top_sec_str, _rot_d.rotating_in, _rot_d.rotating_out,
+                    _top_ind_str,
+                )
+
+            if _DYN_UNIVERSE_ENABLED:
+                _dyn = _build_dynamic_universe(
+                    sector_scores=_sec_scores_b,
+                    industry_scores=_ind_scores_b,
+                    market_mode=_regime.regime,
+                )
+                log.info(
+                    "dynamic_universe active=%d priority=%d reduced=%d "
+                    "top_sectors=%s top_industries=%s",
+                    len(_dyn.active_symbols), len(_dyn.priority_symbols),
+                    len(_dyn.reduced_symbols),
+                    _dyn.top_sectors[:5], _dyn.top_industries[:5],
+                )
+
+                if _SCAN_SCHEDULER_ENABLED:
+                    _sched = _build_scan_schedule(_dyn)
+                    _sc_counts = _get_schedule_counts()
+                    _sample_high = sorted([s for s, p in _sched.items() if p == "HIGH"])[:5]
+                    _sample_low = sorted([s for s, p in _sched.items() if p == "LOW"])[:5]
+                    log.info(
+                        "scan_schedule high=%d normal=%d low=%d "
+                        "sample_high=%s sample_low=%s",
+                        _sc_counts.get("HIGH", 0),
+                        _sc_counts.get("NORMAL", 0),
+                        _sc_counts.get("LOW", 0),
+                        _sample_high, _sample_low,
+                    )
+                    # Update per-symbol scan priority in cache
+                    with _lock:
+                        for _sym, _pri in _sched.items():
+                            _sc_entry = _cache.get(_sym)
+                            if _sc_entry is not None:
+                                _sc_entry.scan_priority = _pri
+        except Exception:
+            log.exception("phase_b_refresh_error")
+
+        # ── OFF_HOURS board publish (every 30 s) ────────────────────
         if now_loop - last_off_hours_publish_ts >= _OFF_HOURS_PUBLISH_INTERVAL_S:
             last_off_hours_publish_ts = now_loop
             _publish_off_hours_board()
@@ -1976,7 +3432,14 @@ def main() -> None:
         if _FORCE_INTENT and _bus is not None:
             _maybe_force_intent(cache_snapshot)
 
-        time.sleep(settings.heartbeat_interval_s)
+        # ── Candidate board (every 60 s) ─────────────────────────────
+        if now_loop - last_candidate_board_ts >= _CANDIDATE_BOARD_INTERVAL_S:
+            last_candidate_board_ts = now_loop
+            _print_candidate_board()
+
+        _stop_event.wait(settings.heartbeat_interval_s)
+        if _stop_event.is_set():
+            break
 
     # Cleanup
     if _bus is not None:

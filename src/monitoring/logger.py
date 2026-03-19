@@ -48,6 +48,26 @@ class _HumanFormatter(logging.Formatter):
         return super().format(record)
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that silently ignores BrokenPipeError on flush/emit.
+
+    This prevents noisy tracebacks when stdout is piped through a process
+    that exits early (e.g. ``head``, ``timeout``, or a closed ``tee``).
+    """
+
+    def flush(self) -> None:
+        try:
+            super().flush()
+        except BrokenPipeError:
+            pass
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            super().emit(record)
+        except BrokenPipeError:
+            pass
+
+
 def get_logger(arm_name: str, level: Optional[str] = None) -> logging.Logger:
     """Return a logger scoped to *arm_name*.
 
@@ -62,7 +82,7 @@ def get_logger(arm_name: str, level: Optional[str] = None) -> logging.Logger:
     if logger.handlers:
         return logger  # already set up
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = _SafeStreamHandler(sys.stdout)
     formatter: logging.Formatter
     if settings.log_json:
         formatter = _JsonFormatter()
