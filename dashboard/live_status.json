@@ -1,0 +1,90 @@
+{
+  "session_id": "monitor_1710860000",
+  "mode": "PAPER",
+  "backend": "local",
+  "timestamp_utc": "2026-03-19T14:30:00.000000+00:00",
+  "timestamp_epoch": 1710860000.0,
+  "uptime_seconds": 3600.5,
+  "loop_count": 360,
+  "armed": true,
+  "market_open": true,
+  "regime": "BALANCED",
+  "breadth_pct": 0.5823,
+  "equity": 100000.00,
+  "open_risk_total_pct": 0.0234,
+  "open_risk_filled_pct": 0.0180,
+  "open_risk_pending_pct": 0.0054,
+  "active_positions": 4,
+  "working_orders": 2,
+  "filled_symbols": ["AAPL", "MSFT", "NVDA", "TSLA"],
+  "working_symbols": ["AMD", "GOOGL"],
+  "trail_active_symbols": ["NVDA", "TSLA"],
+  "confirmed_fills": ["AAPL", "MSFT", "NVDA", "TSLA"],
+  "signals_generated": 47,
+  "intents_created": 12,
+  "orders_placed": 6,
+  "risk_rejected": 3,
+  "errors": 0,
+  "recent_events": [
+    {"symbol": "NVDA", "type": "PAPER_FILL", "status": "FILLED", "qty": 15, "price": 142.50, "ts": "2026-03-19T14:28:12+00:00"},
+    {"symbol": "AAPL", "type": "PAPER_FILL", "status": "FILLED", "qty": 25, "price": 198.30, "ts": "2026-03-19T14:25:45+00:00"},
+    {"symbol": "TSLA", "type": "PAPER_FILL", "status": "FILLED", "qty": 10, "price": 178.60, "ts": "2026-03-19T14:22:10+00:00"},
+    {"symbol": "MSFT", "type": "PAPER_FILL", "status": "FILLED", "qty": 20, "price": 425.00, "ts": "2026-03-19T14:18:30+00:00"},
+    {"symbol": "META", "type": "REJECTED", "status": "RISK_BLOCK", "qty": 12, "price": 0.0, "ts": "2026-03-19T14:15:00+00:00"},
+    {"symbol": "AMD", "type": "WORKING", "status": "PENDING", "qty": 30, "price": 162.00, "ts": "2026-03-19T14:29:50+00:00"},
+    {"symbol": "GOOGL", "type": "WORKING", "status": "PENDING", "qty": 8, "price": 172.10, "ts": "2026-03-19T14:29:55+00:00"}
+  ],
+  "arms": {
+    "ingest":    {"last_seen_s": 2.1, "status": "ok"},
+    "signal":    {"last_seen_s": 3.4, "status": "ok"},
+    "risk":      {"last_seen_s": 1.8, "status": "ok"},
+    "execution": {"last_seen_s": 5.2, "status": "ok"},
+    "monitor":   {"last_seen_s": 0.1, "status": "ok"}
+  },
+  "session_type": "REGULAR",
+  "pnl": {
+    "realized": 342.50,
+    "unrealized": 128.75,
+    "total": 471.25
+  },
+  "total_trades": 8,
+  "win_rate": 0.625,
+  "kill_switch": {
+    "kill_switch": false,
+    "session_pnl": 471.25,
+    "session_hwm": 520.00,
+    "drawdown": 48.75,
+    "max_drawdown": 2000.00,
+    "trades_this_hour": 4,
+    "max_trades_hour": 50,
+    "symbols_exposed": 4,
+    "total_exposure": 18650.00,
+    "failed_orders_1h": 0,
+    "loss_streak": 0,
+    "atr_spike": false
+  },
+  "allocation": {
+    "regime": "BALANCED",
+    "risk_posture": "MODERATE",
+    "bucket_usage": {
+      "news": 2,
+      "rotation": 1,
+      "volatility": 1,
+      "meanrevert": 0,
+      "total": 4,
+      "max_total": 8
+    }
+  },
+  "universe_size": 185,
+  "agent_intel": {
+    "loaded": 12,
+    "symbols": ["AAPL", "AMD", "AXTI", "BABA", "CAL", "DLTH", "GOOGL", "META", "MSFT", "NVDA", "TSLA", "WMT"]
+  },
+  "blueprints_count": 2,
+  "recent_trades": [
+    {"symbol": "NVDA", "side": "LONG", "qty": 15, "entry": 140.00, "current": 142.50, "pnl": 37.50, "r_mult": 0.85},
+    {"symbol": "AAPL", "side": "LONG", "qty": 25, "entry": 196.80, "current": 198.30, "pnl": 37.50, "r_mult": 0.62},
+    {"symbol": "TSLA", "side": "LONG", "qty": 10, "entry": 175.20, "current": 178.60, "pnl": 34.00, "r_mult": 0.95},
+    {"symbol": "MSFT", "side": "LONG", "qty": 20, "entry": 423.50, "current": 425.00, "pnl": 30.00, "r_mult": 0.40}
+  ]
+}

@@ -1,12 +1,16 @@
 """
 News Fetcher
 Retrieves news articles about stocks from multiple sources.
-Focuses on identifying trending stocks with positive news sentiment.
+Primary provider: Benzinga (general news endpoint).
+Fallback: RSS (Google News).
 """
 
 import logging
+import os
 import requests
-from datetime import datetime, timedelta
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 from urllib.parse import quote
@@ -16,6 +20,250 @@ import re
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── News Category Classification (Legend Phase 1) ────────────────────
+
+# Category → (keywords, multiplier)
+_CATEGORY_RULES: list[tuple[str, list[str], float]] = [
+    ("FDA",      ["fda", "approval", "clinical trial", "phase 3", "phase 2", "drug", "biologic", "nda", "eua"], 4.0),
+    ("MNA",      ["acquisition", "merger", "buyout", "takeover", "deal value", "acquires", "acquire", "merge"], 3.5),
+    ("EARNINGS", ["earnings", "revenue", "eps", "beat", "miss", "guidance", "quarterly", "profit", "loss per share"], 3.0),
+    ("MGMT",     ["ceo", "cfo", "cto", "appoint", "resign", "fired", "leadership", "board of directors"], 2.0),
+    ("ANALYST",  ["upgrade", "downgrade", "price target", "maintains", "raises", "lowers", "buy rating", "sell rating", "overweight", "underweight"], 1.5),
+    ("MACRO",    ["fed", "inflation", "rates", "cpi", "jobs", "fomc", "gdp", "tariff", "geopolitics", "sanctions"], 1.0),
+]
+
+
+def classify_news(title: str) -> tuple[str, float]:
+    """Classify a news headline into a category with a score multiplier.
+
+    Returns ``(category, multiplier)`` where *category* is one of
+    ``FDA | MNA | EARNINGS | MGMT | ANALYST | MACRO | GENERAL``
+    and *multiplier* scales news impact (1.0 – 4.0).
+
+    Rules are evaluated in priority order; the first match wins.
+    """
+    hl = title.lower()
+    for category, keywords, multiplier in _CATEGORY_RULES:
+        if any(kw in hl for kw in keywords):
+            return category, multiplier
+    return "GENERAL", 1.0
+
+
+# ── Benzinga configuration ───────────────────────────────────────────
+# The ONLY supported env var is BENZINGA_API_KEY.  No aliases.
+
+_BENZINGA_API_KEY: str = os.environ.get("BENZINGA_API_KEY", "").strip()
+_BENZINGA_BASE_URL = "https://api.benzinga.com/api/v2/news"
+
+
+class BenzingaNewsAPI:
+    """Fetch general news from the Benzinga v2 news endpoint.
+
+    One API call returns many articles, each with a ``stocks`` array
+    containing ticker symbols.
+    """
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or _BENZINGA_API_KEY
+        logger.info("BenzingaNewsAPI init  key_present=%s", bool(self.api_key))
+
+    def fetch_general_news(self, max_items: int = 100) -> tuple[List[Dict], str]:
+        """Fetch general news from Benzinga.
+
+        Returns ``(items, reason)`` where *items* is a list of dicts::
+
+            {"headline", "source", "url", "ts" (datetime UTC),
+             "related_tickers" (list[str]), "summary"}
+
+        *reason* is ``""`` on success, or a short string explaining the
+        failure (HTTP status, network error, etc.).
+        """
+        if not self.api_key:
+            return [], "no_api_key"
+
+        items: List[Dict] = []
+        try:
+            resp = requests.get(
+                _BENZINGA_BASE_URL,
+                params={
+                    "token": self.api_key,
+                    "displayOutput": "json",
+                    "items": str(min(max_items, 100)),
+                },
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                reason = f"HTTP {resp.status_code}"
+                logger.warning("Benzinga fetch failed: %s", reason)
+                return [], reason
+
+            data = resp.json()
+
+            # Benzinga returns a list of article objects
+            if not isinstance(data, list):
+                reason = f"unexpected_payload:{type(data).__name__}"
+                logger.warning("Benzinga unexpected payload type: %s", type(data))
+                return [], reason
+
+            for raw in data[:max_items]:
+                title = (raw.get("title") or "").strip()
+                if not title:
+                    continue
+
+                # Extract ticker symbols from stocks[].name
+                stocks = raw.get("stocks") or []
+                related_tickers: List[str] = []
+                for stock_entry in stocks:
+                    name = stock_entry.get("name", "").strip().upper()
+                    if name and 1 <= len(name) <= 6:
+                        related_tickers.append(name)
+
+                # Parse created timestamp (ISO-8601)
+                created_str = raw.get("created", "")
+                ts: datetime
+                try:
+                    ts = datetime.fromisoformat(created_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    ts = datetime.now(timezone.utc)
+
+                items.append({
+                    "headline": title,
+                    "source": "Benzinga",
+                    "url": raw.get("url", ""),
+                    "ts": ts,
+                    "related_tickers": related_tickers,
+                    "summary": (raw.get("body") or raw.get("teaser") or "")[:500],
+                })
+
+            logger.info("Benzinga fetch ok items=%d", len(items))
+            return items, ""
+
+        except requests.exceptions.ConnectionError as exc:
+            reason = f"connection_error:{exc}"
+            logger.warning("Benzinga fetch failed: %s", reason)
+            return [], reason
+        except requests.exceptions.Timeout:
+            reason = "timeout"
+            logger.warning("Benzinga fetch failed: %s", reason)
+            return [], reason
+        except Exception as exc:
+            reason = f"error:{exc}"
+            logger.warning("Benzinga fetch failed: %s", reason)
+            return [], reason
+
+
+# ── Finnhub news fetcher (Legend Phase 2 – tertiary provider) ────────
+
+_FINNHUB_API_KEY: str = os.environ.get("FINNHUB_API_KEY", "").strip()
+_FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/news"
+
+# Rate-limit / cooldown state (module-level, thread-safe via GIL)
+_finnhub_last_call_ts: float = 0.0
+_finnhub_min_interval_s: float = 2.0          # ≥2 s between calls
+_finnhub_cooldown_until: float = 0.0          # epoch – disabled until this time
+_FINNHUB_COOLDOWN_S: float = 300.0            # 5 min cooldown on 429
+
+
+def fetch_finnhub_news(max_items: int = 50) -> tuple[list[dict], str]:
+    """Fetch general news from Finnhub.
+
+    Returns ``(items, reason)`` in the same dict schema as BenzingaNewsAPI:
+    ``{"headline", "source", "url", "ts", "related_tickers", "summary"}``.
+
+    Rate-limits to one call per ``_finnhub_min_interval_s``.
+    On HTTP 429, enters 5-min cooldown and returns empty.
+    """
+    global _finnhub_last_call_ts, _finnhub_cooldown_until
+
+    key = _FINNHUB_API_KEY
+    if not key:
+        return [], "no_finnhub_key"
+
+    now = time.time()
+    if now < _finnhub_cooldown_until:
+        remaining = int(_finnhub_cooldown_until - now)
+        return [], f"cooldown_{remaining}s"
+
+    # Rate-limit: enforce minimum interval
+    elapsed = now - _finnhub_last_call_ts
+    if elapsed < _finnhub_min_interval_s:
+        time.sleep(_finnhub_min_interval_s - elapsed)
+    _finnhub_last_call_ts = time.time()
+
+    items: list[dict] = []
+    try:
+        resp = requests.get(
+            _FINNHUB_NEWS_URL,
+            params={"category": "general", "minId": "0", "token": key},
+            timeout=10,
+        )
+        if resp.status_code == 429:
+            _finnhub_cooldown_until = time.time() + _FINNHUB_COOLDOWN_S
+            logger.warning(
+                "Finnhub 429 — entering %.0fs cooldown", _FINNHUB_COOLDOWN_S,
+            )
+            return [], "rate_limited_429"
+        if resp.status_code != 200:
+            return [], f"HTTP {resp.status_code}"
+
+        data = resp.json()
+        if not isinstance(data, list):
+            return [], f"unexpected_payload:{type(data).__name__}"
+
+        for raw in data[:max_items]:
+            title = (raw.get("headline") or "").strip()
+            if not title:
+                continue
+
+            # Finnhub gives ``related`` as a comma-string, e.g. "AAPL,MSFT"
+            related_str = raw.get("related") or ""
+            related_tickers = [
+                t.strip().upper()
+                for t in related_str.split(",")
+                if t.strip() and 1 <= len(t.strip()) <= 6
+            ]
+
+            ts: datetime
+            epoch = raw.get("datetime")
+            if epoch and isinstance(epoch, (int, float)):
+                ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            else:
+                ts = datetime.now(timezone.utc)
+
+            items.append({
+                "headline": title,
+                "source": raw.get("source", "Finnhub"),
+                "url": raw.get("url", ""),
+                "ts": ts,
+                "related_tickers": related_tickers,
+                "summary": (raw.get("summary") or "")[:500],
+            })
+
+        logger.info("Finnhub fetch ok items=%d", len(items))
+        return items, ""
+
+    except requests.exceptions.Timeout:
+        return [], "timeout"
+    except requests.exceptions.ConnectionError as exc:
+        return [], f"connection_error:{exc}"
+    except Exception as exc:
+        logger.warning("Finnhub fetch failed: %s", exc)
+        return [], f"error:{exc}"
+
+
+# ── Normalised title for dedupe (Legend Phase 2) ─────────────────────
+
+_NORM_RE = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalise_title(title: str) -> str:
+    """Lowercase, strip punctuation / extra spaces — for dedupe hashing."""
+    return _NORM_RE.sub("", title.lower()).strip()
 
 
 @dataclass
@@ -28,6 +276,7 @@ class NewsArticle:
     published_date: str
     summary: str
     sentiment_score: Optional[float] = None  # -1 to +1
+    related_tickers: Optional[List[str]] = None  # API-provided related symbols
     sentiment_label: Optional[str] = None  # "positive", "neutral", "negative"
     relevance_score: Optional[float] = None  # 0 to 1
     
@@ -288,108 +537,3 @@ class NewsFetcher:
             return datetime.now()
         except:
             return datetime.now()
-
-
-class FinancialNewsAPI:
-    """
-    Alternative news sources using APIs.
-    Requires API keys - configure in environment.
-    """
-    
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or "demo"  # Use demo key if not provided
-        self.base_url = "https://finnhub.io/api/v1"
-    
-    def fetch_company_news(self, symbol: str, days_back: int = 7) -> List[NewsArticle]:
-        """
-        Fetch news from Finnhub API.
-        Sign up at https://finnhub.io for free API key.
-        """
-        articles = []
-        
-        try:
-            from_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-            to_date = datetime.now().strftime('%Y-%m-%d')
-            
-            url = f"{self.base_url}/company-news"
-            params = {
-                'symbol': symbol,
-                'from': from_date,
-                'to': to_date,
-                'token': self.api_key
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for item in data:
-                    article = NewsArticle(
-                        symbol=symbol,
-                        title=item.get('headline', ''),
-                        source=item.get('source', 'Finnhub'),
-                        url=item.get('url', ''),
-                        published_date=datetime.fromtimestamp(item.get('datetime', 0)).isoformat(),
-                        summary=item.get('summary', '')
-                    )
-                    articles.append(article)
-                
-                logger.info(f"{symbol}: Fetched {len(articles)} articles from Finnhub")
-            else:
-                logger.warning(f"Finnhub API returned status {response.status_code}")
-        
-        except Exception as e:
-            logger.error(f"Failed to fetch from Finnhub: {e}")
-        
-        return articles
-    
-    def fetch_market_news(self, category: str = "general") -> List[NewsArticle]:
-        """
-        Fetch general market news.
-        Categories: general, forex, crypto, merger
-        """
-        articles = []
-        
-        try:
-            url = f"{self.base_url}/news"
-            params = {
-                'category': category,
-                'token': self.api_key
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for item in data[:50]:  # Limit to 50
-                    # Try to extract symbol
-                    symbol = self._extract_symbol(item.get('headline', ''))
-                    
-                    if symbol:
-                        article = NewsArticle(
-                            symbol=symbol,
-                            title=item.get('headline', ''),
-                            source=item.get('source', 'Finnhub'),
-                            url=item.get('url', ''),
-                            published_date=datetime.fromtimestamp(item.get('datetime', 0)).isoformat(),
-                            summary=item.get('summary', '')
-                        )
-                        articles.append(article)
-                
-                logger.info(f"Fetched {len(articles)} market news articles")
-        
-        except Exception as e:
-            logger.error(f"Failed to fetch market news: {e}")
-        
-        return articles
-    
-    def _extract_symbol(self, text: str) -> Optional[str]:
-        """Extract first stock symbol from text."""
-        match = re.search(r'\b([A-Z]{1,5})\b', text)
-        if match:
-            symbol = match.group(1)
-            if symbol not in ['US', 'CEO', 'CFO', 'USD', 'IPO']:
-                return symbol
-        return None

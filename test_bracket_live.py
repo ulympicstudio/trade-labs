@@ -1,120 +1,132 @@
 #!/usr/bin/env python3
 """
-Test corrected bracket order structure - SIM mode first
-Shows what orders would be placed without executing
+Integration-style smoke test for bracket math in SIM mode.
+
+Key points:
+- Does NOT place real orders.
+- Does NOT prompt for input (pytest-friendly).
+- Uses IB if available; otherwise skips.
 """
+
 import os
-os.environ['TRADE_LABS_ARMED'] = '0'  # SIM mode - no actual orders
-os.environ['TRADE_LABS_MODE'] = 'PAPER'
-os.environ['TRADE_LABS_EXECUTION_BACKEND'] = 'SIM'
+import math
+import pytest
 
-print("\n" + "="*70)
-print("BRACKET ORDER TEST - Corrected Structure (SIM Mode)")
-print("="*70 + "\n")
+# Force safe defaults
+os.environ["TRADE_LABS_ARMED"] = "0"  # SIM mode - no actual orders
+os.environ["TRADE_LABS_MODE"] = "PAPER"
+os.environ["TRADE_LABS_EXECUTION_BACKEND"] = "SIM"
 
-from src.signals.market_scanner import scan_us_most_active
-from src.signals.score_candidates import score_candidates
-from src.execution.bracket_orders import BracketParams, place_limit_tp_trail_bracket
-from ib_insync import IB
 
-# Get candidates
-print("[SCAN] Fetching market candidates...")
-candidates = scan_us_most_active(limit=30)
-print(f"[SCAN] Found {len(candidates)} candidates\n")
+def test_bracket_live_sim():
+    print("\n" + "=" * 70)
+    print("BRACKET ORDER TEST - Corrected Structure (SIM Mode)")
+    print("=" * 70 + "\n")
 
-if not candidates:
-    print("[ERROR] No candidates found, cannot test")
-    exit(1)
+    # Import inside test so env vars above apply
+    from src.broker.ib_session import get_ib
+    from src.signals.market_scanner import scan_us_most_active, get_quote
+    from src.signals.score_candidates import score_candidates
 
-# Score candidates
-print("[SCORE] Scoring candidates...")
-scored = score_candidates(candidates, top_n=5)
-print(f"[SCORE] Got {len(scored)} top candidates\n")
-
-if not scored:
-    print("[ERROR] No scored candidates, cannot test")
-    exit(1)
-
-# Show the bracket that would be placed
-top_stock = scored[0]
-symbol = top_stock['symbol']
-px = top_stock['lastClose']
-atr = top_stock['atr14']
-momentum = top_stock['momentum60m']
-
-print(f"[TEST] Top candidate: {symbol}")
-print(f"  Price: ${px:.2f}")
-print(f"  ATR14: ${atr:.2f}")
-print(f"  Momentum: {momentum:.2%}\n")
-
-# Calculate bracket (same logic as live_loop)
-ENTRY_OFFSET_PCT = 0.0005
-STOP_LOSS_R = 2.0
-TRAIL_ATR_MULT = 1.2
-RISK_PER_TRADE = 0.005  # 0.5%
-
-entry = px * (1 - ENTRY_OFFSET_PCT)
-stop_dist = atr  # Simple: ATR as our risk unit
-stop_loss = entry - (STOP_LOSS_R * stop_dist)
-trail_amt = atr * TRAIL_ATR_MULT
-
-# Assume $1M account for qty calculation
-account_equity = 1_000_000
-risk_dollars = account_equity * RISK_PER_TRADE
-qty = int(risk_dollars // stop_dist)
-
-print(f"[BRACKET] Structure for {symbol}:")
-print(f"\n  Entry (BUY LMT):           ${entry:.2f}")
-print(f"  Stop Loss (SELL STP):      ${stop_loss:.2f}  (protection floor - TRUE stop order)")
-print(f"  Trail Amount (TRAIL):      ${trail_amt:.2f}  (upside anchor)\n")
-
-print(f"[MATH] Risk breakdown:")
-print(f"  Risk per share:            ${entry - stop_loss:.2f}")
-print(f"  Risk per trade (0.5%):     ${risk_dollars:,.0f}")
-print(f"  Quantity:                  {qty} shares\n")
-
-print(f"[SCENARIOS]")
-scenarios = [
-    (f"${px * 0.97:.2f}", "Stock drops 3%", "❌ STOP LOSS fills (limited loss)"),
-    (f"${px * 1.02:.2f}", "Stock rises 2%", "✓ TRAIL follows up (gains locked)"),
-    (f"${px * 1.05:.2f}", "Stock rises 5%", "✓ TRAIL follows up (gains growing)"),
-    (f"${px * 1.08:.2f}", "Stock rises 8%", "✓ TRAIL follows up (max profit)"),
-]
-
-for price_str, scenario, outcome in scenarios:
-    print(f"  {scenario:20} → Price {price_str:8} → {outcome}")
-
-print(f"\n[STRUCTURE]")
-print(f"  Parent:   BUY  {qty:4d} @ ${entry:.2f} (transmit=False)")
-print(f"  Child A:  SELL {qty:4d} @ ${stop_loss:.2f} (STOP LOSS - OCA)")
-print(f"  Child B:  SELL {qty:4d} Trail ${trail_amt:.2f} (TRAIL - OCA)")
-print(f"  OCA Group: Both children in same group (mutual execution)")
-
-print("\n" + "="*70)
-print("This is SIM mode - no actual orders will be placed")
-print("="*70 + "\n")
-
-# Now ask user if they want to proceed with paper trading
-response = input("Ready to test in PAPER TRADING mode (ARMED=0, IB connected)? [y/n]: ")
-
-if response.lower() == 'y':
-    print("\n[PAPER TEST] Testing with IB connection (no actual money at risk)...")
-    print("[PAPER TEST] Starting 20-second test run...\n")
-    
-    # Run in paper mode with IB connection
-    os.environ['IB_CLIENT_ID_OVERRIDE'] = '35'
-    os.environ['TRADE_LABS_ARMED'] = '0'  # Still SIM, but with IB
-    
-    # Import and run live loop
-    from src.live_loop_10s import main
-    
+    # Connect to IB (or skip if not running)
     try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[TEST] Interrupted by user")
+        ib = get_ib()
     except Exception as e:
-        print(f"\n[ERROR] {e}")
-else:
-    print("[TEST] Skipped paper test")
+        pytest.skip(f"IB not available (TWS/IB Gateway not running): {e}")
 
-print("\n✓ Test complete")
+    try:
+        # 1) Scan candidates
+        print("[SCAN] Fetching market candidates...")
+        candidates = scan_us_most_active(ib, limit=30)
+        print(f"[SCAN] Found {len(candidates)} candidates\n")
+
+        if not candidates:
+            pytest.skip("No candidates returned from scanner (market closed or scanner empty).")
+
+        # 2) Score candidates (use IB explicitly so wrapper doesn't create its own connection)
+        print("[SCORE] Scoring candidates...")
+        scored = score_candidates(ib, candidates, top_n=5)
+        print(f"[SCORE] Got {len(scored)} top candidates\n")
+
+        if not scored:
+            pytest.skip("No scored candidates returned.")
+
+        top = scored[0]
+
+        # ScoredCandidate fields:
+        # ['symbol', 'rank', 'momentum_pct_60m', 'atr14', 'score', 'reason']
+        symbol = top.symbol
+        atr = float(top.atr14 or 0.0)
+        momentum = float(top.momentum_pct_60m or 0.0)
+
+        # 3) Fetch quote for price
+        bid, ask, last = get_quote(ib, symbol)
+        px = (
+            last
+            if last is not None
+            else ((bid + ask) / 2.0 if (bid is not None and ask is not None) else None)
+        )
+
+        if px is None:
+            pytest.skip(f"No quote available for {symbol} (bid/ask/last all None).")
+
+        px = float(px)
+
+        # IB can return NaN/inf (often due to missing real-time market data subscription).
+        # If px is NaN/inf, skip instead of failing the suite.
+        if not math.isfinite(px) or px <= 0:
+            pytest.skip(
+                f"Price not usable for {symbol} (px={px}). Likely delayed/unsubscribed market data."
+            )
+
+        print(f"[TEST] Top candidate: {symbol}")
+        print(f"  Price (quote): ${px:.2f}")
+        print(f"  ATR14:         ${atr:.2f}")
+        print(f"  Momentum60m:   {momentum:.2%}")
+        print(f"  Score:         {top.score:.2f}")
+        if getattr(top, "reason", None):
+            print(f"  Reason:        {top.reason}")
+        print()
+
+        # 4) Bracket math (same style as live_loop)
+        ENTRY_OFFSET_PCT = 0.0005
+        STOP_LOSS_R = 2.0
+        TRAIL_ATR_MULT = 1.2
+        RISK_PER_TRADE = 0.005  # 0.5%
+
+        # Guard against bad ATR
+        if atr <= 0:
+            pytest.skip(f"ATR14 not usable for {symbol} (atr14={atr}).")
+
+        entry = px * (1 - ENTRY_OFFSET_PCT)
+        stop_dist = atr
+        stop_loss = entry - (STOP_LOSS_R * stop_dist)
+        trail_amt = atr * TRAIL_ATR_MULT
+
+        # Assume $1M account for qty calculation (test only)
+        account_equity = 1_000_000
+        risk_dollars = account_equity * RISK_PER_TRADE
+        qty = int(risk_dollars // stop_dist)
+
+        print(f"[BRACKET] Structure for {symbol}:")
+        print(f"  Entry (BUY LMT):      ${entry:.2f}")
+        print(f"  Stop Loss (SELL STP): ${stop_loss:.2f}")
+        print(f"  Trail Amount:         ${trail_amt:.2f}")
+        print()
+        print("[MATH]")
+        print(f"  Risk per share:       ${entry - stop_loss:.2f}")
+        print(f"  Risk per trade:       ${risk_dollars:,.0f}")
+        print(f"  Quantity:             {qty} shares\n")
+
+        # 5) Assertions (sanity checks)
+        assert qty > 0
+        assert entry > 0
+        assert stop_loss < entry
+        assert trail_amt > 0
+
+    finally:
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+        except Exception:
+            pass

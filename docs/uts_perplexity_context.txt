@@ -1,0 +1,13 @@
+UTS (Unified Trading System) is an automated intraday equity trading system built in Python (~20,000 lines). It uses an arms-based architecture: five modules (ingest, signal, risk, execution, monitor) communicate via an in-memory pub/sub bus using typed dataclass messages.
+
+Market data: IB Gateway snapshots (when connected) or synthetic random-walk quotes (paper default). News: Benzinga API + GNews RSS, deduplicated, scored by event type (FDA 4×, M&A 3.5×, earnings 3×). RSI-14 and RVOL are computed in the ingest arm and enriched onto MarketSnapshot messages.
+
+Signal generation: RSI < 35 + price > VWAP + spread < 0.3% → LONG TradeIntent. Off-hours scoring uses 6-component composite (news, momentum, volume, spread, RSI, liquidity). Regime gating blocks longs in PANIC.
+
+Risk engine: 12-step quantity adjustment chain (risk cap → event size → regime → vol → sector → vol leader → rotation → allocation → market mode → scorecard → self-tuning → rotation bias). 8 circuit breakers (daily loss, trades/hour, symbol exposure, correlated cluster, spread halt, failed orders, loss streak, ATR spike). $50 paper / $500 live per-trade cap. Exit intelligence tracks open positions with 7 actions (HOLD, TIGHTEN_STOP, WIDEN_STOP, TRAIL, TRIM_25, TRIM_50, EXIT_FULL) and playbook-specific rules.
+
+Execution: Paper fills with +2 bps slippage simulation. Live IB path exists but is permanently blocked in code. Bracket orders: LMT parent + STP child + optional TRAIL child.
+
+Current status: Paper-only. Known data issues: $100 synthetic price contamination for 26/31 symbols, RSI warmup from synthetic candles, RVOL unavailable in first 3.5 minutes of session. Open risk not dynamically tracked (2% cap may be bypassed). No short-side handling. No multi-day drawdown tracking. System state is in-memory only (lost on restart).
+
+Codebase: Python 3.13, ib_insync, feedparser, requests. Five arms in src/arms/, risk modules in src/risk/, signals in src/signals/, analysis in src/analysis/.

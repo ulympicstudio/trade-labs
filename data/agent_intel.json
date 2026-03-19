@@ -1,0 +1,226 @@
+{
+  "generated_at": "2026-03-19T20:15:00-07:00",
+  "session_date": "2026-03-19",
+  "model": "perplexity-computer",
+  "symbols": {
+    "FDX": {
+      "catalyst_score": 8,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "FedEx reported Q3 FY2026 after market close with consensus calling for $4.12 EPS and $23.48B revenue; prediction markets assigned 94% probability of a beat. DRIVE cost-reduction program is the key margin driver.",
+      "sentiment": 0.65,
+      "risk_flags": [
+        "earnings_trap"
+      ],
+      "conviction": "HIGH",
+      "ttl_minutes": 480
+    },
+    "ALGN": {
+      "catalyst_score": 8,
+      "catalyst_type": "MERGER",
+      "catalyst_summary": "Elliott Investment Management disclosed a significant stake in Align Technology (Invisalign maker). Elliott typically pushes for buybacks or strategic review. Stock rose 2.23% to $176.25 with room to run toward $208 52-week high.",
+      "sentiment": 0.72,
+      "risk_flags": [
+        "sector_headwind"
+      ],
+      "conviction": "HIGH",
+      "ttl_minutes": 480
+    },
+    "PTGX": {
+      "catalyst_score": 8,
+      "catalyst_type": "FDA",
+      "catalyst_summary": "FDA approved ICOTYDE (icotrokinra) for plaque psoriasis on March 18 \u2014 first-ever oral IL-23 receptor targeted peptide. PTGX co-developed with J&J and receives royalties. Rose +5% to $101.94.",
+      "sentiment": 0.75,
+      "risk_flags": [],
+      "conviction": "HIGH",
+      "ttl_minutes": 480
+    },
+    "MU": {
+      "catalyst_score": 7,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Micron delivered historic Q2 FY2026 blowout \u2014 revenue $23.86B vs $12.9B est, EPS $12.20 vs $8.80 est. Q3 guidance of $33.5B revenue. Stock fell 3.8% in sell-the-news reaction.",
+      "sentiment": 0.35,
+      "risk_flags": [
+        "earnings_trap",
+        "overbought"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "AXTI": {
+      "catalyst_score": 7,
+      "catalyst_type": "ANALYST_ACTION",
+      "catalyst_summary": "AXT Inc surged 19% to $58 on InP demand for AI infrastructure. Wedbush and Northland raised targets citing 42% projected 2-year revenue CAGR and customer wins at Google/Amazon.",
+      "sentiment": 0.6,
+      "risk_flags": [
+        "china_exposure",
+        "overbought"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "TSEM": {
+      "catalyst_score": 6,
+      "catalyst_type": "PRODUCT_LAUNCH",
+      "catalyst_summary": "Tower Semiconductor surged 17% to $166 after partnership with Oriole Networks for silicon photonics AI networking. Hit all-time high.",
+      "sentiment": 0.65,
+      "risk_flags": [
+        "overbought"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "DLTH": {
+      "catalyst_score": 6,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Duluth Holdings beat Q4 adj EPS by 109% ($0.23 vs $0.11 est) and revenue by 14.5%. Net income turned positive. Stock +44.7% to $3.14.",
+      "sentiment": 0.7,
+      "risk_flags": [
+        "low_liquidity",
+        "overbought"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "LIDR": {
+      "catalyst_score": 6,
+      "catalyst_type": "PRODUCT_LAUNCH",
+      "catalyst_summary": "AEye joined NVIDIA Halos AI Systems Inspection Lab. Q4 revenue +110%. Holds $86.5M cash with runway into 2028.",
+      "sentiment": 0.5,
+      "risk_flags": [
+        "low_liquidity",
+        "overbought",
+        "short_squeeze_risk"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "JNJ": {
+      "catalyst_score": 6,
+      "catalyst_type": "FDA",
+      "catalyst_summary": "FDA approved ICOTYDE (icotrokinra) on March 18 \u2014 first oral IL-23 receptor antagonist for plaque psoriasis. Targets 8M+ US patients.",
+      "sentiment": 0.35,
+      "risk_flags": [
+        "sector_headwind"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "CAL": {
+      "catalyst_score": 6,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Caleres beat Q4 earnings, +18.9% to $10.53. Stock remains 42% below $18.27 52-week high.",
+      "sentiment": 0.55,
+      "risk_flags": [
+        "sector_headwind",
+        "low_liquidity"
+      ],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    },
+    "NVDA": {
+      "catalyst_score": 4,
+      "catalyst_type": "SECTOR_MOMENTUM",
+      "catalyst_summary": "NVIDIA fell 1% to $178.56 amid RISK_OFF rotation away from AI megacaps. MU blowout confirms AI demand but macro headwinds dominate.",
+      "sentiment": -0.1,
+      "risk_flags": [
+        "overbought",
+        "sector_headwind"
+      ],
+      "conviction": "LOW",
+      "ttl_minutes": 480
+    },
+    "ACN": {
+      "catalyst_score": 4,
+      "catalyst_type": "GUIDANCE_CHANGE",
+      "catalyst_summary": "Accenture beat Q2 EPS but guided full-year below consensus, triggering -3.5% selloff. Signals slowing IT consulting demand.",
+      "sentiment": -0.25,
+      "risk_flags": [
+        "earnings_trap"
+      ],
+      "conviction": "LOW",
+      "ttl_minutes": 480
+    },
+    "ELA": {
+      "catalyst_score": 3,
+      "catalyst_type": "SECTOR_MOMENTUM",
+      "catalyst_summary": "Envela surged 32% on 21x normal volume with no identified catalyst. Likely low-float momentum trade.",
+      "sentiment": 0.1,
+      "risk_flags": [
+        "low_liquidity",
+        "short_squeeze_risk",
+        "overbought"
+      ],
+      "conviction": "LOW",
+      "ttl_minutes": 480
+    },
+    "DRI": {
+      "catalyst_score": 3,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Darden Restaurants in-line Q3, +1.85%. Defensive consumer play in RISK_OFF environment.",
+      "sentiment": 0.2,
+      "risk_flags": [
+        "sector_headwind"
+      ],
+      "conviction": "LOW",
+      "ttl_minutes": 480
+    },
+    "BABA": {
+      "catalyst_score": 3,
+      "catalyst_type": "SECTOR_MOMENTUM",
+      "catalyst_summary": "Alibaba revenue miss, stock fell 7% to $124.91. China macro risk and geopolitical exposure persist.",
+      "sentiment": -0.45,
+      "risk_flags": [
+        "china_exposure",
+        "falling_knife",
+        "sector_headwind"
+      ],
+      "conviction": "AVOID",
+      "ttl_minutes": 480
+    },
+    "CSIQ": {
+      "catalyst_score": 2,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Canadian Solar Q4 EPS -$1.66 vs -$0.47 est (253% miss). Net loss $131M. Solar oversupply and tariff uncertainty.",
+      "sentiment": -0.85,
+      "risk_flags": [
+        "falling_knife",
+        "sector_headwind",
+        "china_exposure"
+      ],
+      "conviction": "AVOID",
+      "ttl_minutes": 480
+    },
+    "YRD": {
+      "catalyst_score": 2,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "Yiren Digital plunged 44% on earnings miss. Near 52-week low at $2.06. No reversal catalyst.",
+      "sentiment": -0.9,
+      "risk_flags": [
+        "falling_knife",
+        "china_exposure",
+        "low_liquidity"
+      ],
+      "conviction": "AVOID",
+      "ttl_minutes": 480
+    },
+    "ZKH": {
+      "catalyst_score": 2,
+      "catalyst_type": "EARNINGS",
+      "catalyst_summary": "ZKH Group fell 30.6% to $2.27 on Q4 earnings miss. Only 70K avg daily volume.",
+      "sentiment": -0.8,
+      "risk_flags": [
+        "falling_knife",
+        "china_exposure",
+        "low_liquidity"
+      ],
+      "conviction": "AVOID",
+      "ttl_minutes": 480
+    }
+  },
+  "market_context": {
+    "regime": "RISK_OFF",
+    "sector_rotation": "Rotating out of AI megacaps into idiosyncratic catalysts. Biotech/pharma benefiting from FDA cycle.",
+    "macro_risk": "VIX 24.34 elevated. Accenture guidance cut signals slowing IT demand. FedEx AH results are macro bellwether.",
+    "vix_assessment": "ELEVATED"
+  }
+}

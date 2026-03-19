@@ -75,19 +75,24 @@ def get_realized_pnl() -> float:
 
 def get_unrealized_pnl(ib: IB) -> float:
     """
-    Calculate unrealized P&L from open positions.
-    Uses current market prices via IB.
+    Calculate unrealized P&L from filled positions only.
+    Uses ib.positions() (actual holdings) not openTrades() (which includes
+    submitted-but-unfilled orders and would produce false "No entry price" spam).
     """
     unrealized = 0.0
     
     try:
-        for trade in ib.openTrades():
-            contract = trade.contract
-            position = trade.order.totalQuantity
-            
+        for pos in ib.positions():
+            position = pos.position
             if position == 0:
                 continue
-            
+
+            contract = pos.contract
+            entry_price = float(getattr(pos, "avgCost", 0.0) or 0.0)
+            if entry_price <= 0:
+                # avgCost not yet available — skip silently
+                continue
+
             # Get market data
             try:
                 market_data = ib.reqMktData(contract, "", True, False)
@@ -107,24 +112,6 @@ def get_unrealized_pnl(ib: IB) -> float:
                     continue
             except Exception as e:
                 log.warning(f"Error extracting price for {contract.symbol}: {e}")
-                continue
-            
-            # Find the trade entry price from trades.json
-            trades_file = Path("data/trade_history/trades.json")
-            entry_price = None
-            
-            if trades_file.exists():
-                with open(trades_file) as f:
-                    trades = json.load(f)
-                # Find the most recent OPEN trade for this symbol
-                for t in reversed(trades):
-                    if (t.get("symbol") == contract.symbol and 
-                        t.get("status") == "OPEN"):
-                        entry_price = t.get("entry_price")
-                        break
-            
-            if entry_price is None:
-                log.warning(f"No entry price found for {contract.symbol}")
                 continue
             
             # Calculate unrealized for this position

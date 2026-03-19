@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>U.T.S. Dashboard</title>
+<style>
+/* ── Reset & Base ──────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#1c2128;--border:#30363d;
+  --text:#e6edf3;--text2:#8b949e;--text3:#484f58;
+  --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;
+  --cyan:#39d2c0;--purple:#bc8cff;--orange:#f0883e;
+  --kpi-bg:#21262d;--card-radius:8px;
+}
+html{font-size:14px}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Mono","Fira Code",monospace;min-height:100vh}
+
+/* ── Header ────────────────────────────────────────────── */
+.header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.header h1{font-size:1.1rem;font-weight:600;letter-spacing:.5px}
+.header h1 span{color:var(--blue)}
+.header-right{display:flex;align-items:center;gap:16px;font-size:.8rem;color:var(--text2)}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.status-dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.err{background:var(--red);box-shadow:0 0 6px var(--red)}
+.mode-badge{padding:2px 8px;border-radius:4px;font-weight:600;font-size:.75rem;text-transform:uppercase}
+.mode-badge.paper{background:#1a3a1a;color:var(--green);border:1px solid var(--green)}
+.mode-badge.live{background:#3a1a1a;color:var(--red);border:1px solid var(--red)}
+
+/* ── Kill Switch Banner ────────────────────────────────── */
+.kill-banner{display:none;background:#3a1a1a;border:2px solid var(--red);color:var(--red);text-align:center;padding:10px 20px;font-weight:700;font-size:1rem;letter-spacing:1px;animation:pulse-red 1.5s infinite}
+.kill-banner.active{display:block}
+@keyframes pulse-red{0%,100%{opacity:1}50%{opacity:.6}}
+
+/* ── KPI Row ───────────────────────────────────────────── */
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;padding:14px 20px}
+.kpi{background:var(--kpi-bg);border:1px solid var(--border);border-radius:var(--card-radius);padding:12px 14px;text-align:center}
+.kpi-label{font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.kpi-value{font-size:1.4rem;font-weight:700}
+.kpi-value.positive{color:var(--green)}
+.kpi-value.negative{color:var(--red)}
+.kpi-value.neutral{color:var(--text)}
+.kpi-sub{font-size:.65rem;color:var(--text3);margin-top:2px}
+
+/* ── Grid Layout ───────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 20px 20px}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-radius);overflow:hidden}
+.card-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg3)}
+.card-title{font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.card-badge{font-size:.7rem;padding:1px 6px;border-radius:3px;background:var(--bg);color:var(--text2)}
+.card-body{padding:12px 14px;overflow-x:auto}
+
+/* ── Tables ────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;font-size:.78rem}
+th{text-align:left;color:var(--text2);font-weight:500;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;text-transform:uppercase;font-size:.7rem;letter-spacing:.3px}
+td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.sym{font-weight:600;color:var(--blue)}
+.pnl-pos{color:var(--green)}
+.pnl-neg{color:var(--red)}
+.tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.65rem;margin-right:3px;font-weight:500}
+.tag-fill{background:#1a3a1a;color:var(--green)}
+.tag-reject{background:#3a1a1a;color:var(--red)}
+.tag-work{background:#1a2a3a;color:var(--blue)}
+.tag-bucket{background:var(--bg);color:var(--text2);border:1px solid var(--border)}
+
+/* ── Risk Meter ────────────────────────────────────────── */
+.meter-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.meter-label{font-size:.75rem;color:var(--text2);min-width:90px}
+.meter-track{flex:1;height:10px;background:var(--bg);border-radius:5px;overflow:hidden;border:1px solid var(--border)}
+.meter-fill{height:100%;border-radius:5px;transition:width .5s}
+.meter-fill.low{background:var(--green)}
+.meter-fill.med{background:var(--yellow)}
+.meter-fill.high{background:var(--red)}
+.meter-val{font-size:.75rem;color:var(--text);min-width:48px;text-align:right;font-variant-numeric:tabular-nums}
+
+/* ── Arms Grid ─────────────────────────────────────────── */
+.arms-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px}
+.arm-box{text-align:center;padding:6px 4px;border-radius:6px;border:1px solid var(--border);background:var(--bg)}
+.arm-box.ok{border-color:var(--green)}
+.arm-box.miss{border-color:var(--red);background:#1a1010}
+.arm-name{font-size:.65rem;text-transform:uppercase;color:var(--text2);margin-bottom:2px}
+.arm-age{font-size:.8rem;font-weight:600}
+
+/* ── Stat Row ──────────────────────────────────────────── */
+.stat-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:.78rem}
+.stat-row:last-child{border-bottom:none}
+.stat-label{color:var(--text2)}
+.stat-val{font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ── Full Width ────────────────────────────────────────── */
+.full-width{grid-column:1/-1}
+
+/* ── Footer ────────────────────────────────────────────── */
+.footer{text-align:center;padding:10px;font-size:.65rem;color:var(--text3);border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<div class="header">
+  <h1><span>U.T.S.</span> Dashboard</h1>
+  <div class="header-right">
+    <span id="hdr-session"></span>
+    <span id="hdr-mode" class="mode-badge paper">PAPER</span>
+    <span><span id="hdr-dot" class="status-dot ok"></span><span id="hdr-conn">Connected</span></span>
+    <span id="hdr-time"></span>
+  </div>
+</div>
+
+<!-- ── Kill Switch Banner ──────────────────────────────── -->
+<div id="kill-banner" class="kill-banner">⚠ KILL SWITCH ACTIVE — TRADING HALTED ⚠</div>
+
+<!-- ── KPI Row ─────────────────────────────────────────── -->
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-label">Total P&amp;L</div><div id="kpi-total" class="kpi-value neutral">—</div><div id="kpi-total-sub" class="kpi-sub"></div></div>
+  <div class="kpi"><div class="kpi-label">Realized</div><div id="kpi-real" class="kpi-value neutral">—</div></div>
+  <div class="kpi"><div class="kpi-label">Unrealized</div><div id="kpi-unreal" class="kpi-value neutral">—</div></div>
+  <div class="kpi"><div class="kpi-label">Trades</div><div id="kpi-trades" class="kpi-value neutral">—</div></div>
+  <div class="kpi"><div class="kpi-label">Win Rate</div><div id="kpi-wr" class="kpi-value neutral">—</div></div>
+  <div class="kpi"><div class="kpi-label">Positions</div><div id="kpi-pos" class="kpi-value neutral">—</div><div id="kpi-pos-sub" class="kpi-sub"></div></div>
+  <div class="kpi"><div class="kpi-label">Uptime</div><div id="kpi-uptime" class="kpi-value neutral">—</div><div id="kpi-cycle-sub" class="kpi-sub"></div></div>
+</div>
+
+<!-- ── Main Grid ───────────────────────────────────────── -->
+<div class="grid">
+
+  <!-- Positions -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Open Positions</span><span id="pos-count" class="card-badge">0</span></div>
+    <div class="card-body"><table><thead><tr>
+      <th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Current</th><th class="num">P&amp;L</th><th class="num">R</th>
+    </tr></thead><tbody id="pos-body"></tbody></table></div>
+  </div>
+
+  <!-- Recent Events -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Recent Events</span><span id="evt-count" class="card-badge">0</span></div>
+    <div class="card-body"><table><thead><tr>
+      <th>Time</th><th>Symbol</th><th>Type</th><th>Status</th><th class="num">Qty</th><th class="num">Price</th>
+    </tr></thead><tbody id="evt-body"></tbody></table></div>
+  </div>
+
+  <!-- Risk -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Risk</span><span id="risk-posture" class="card-badge">—</span></div>
+    <div class="card-body">
+      <div id="risk-meters"></div>
+      <div id="risk-stats"></div>
+    </div>
+  </div>
+
+  <!-- Signals & Pipeline -->
+  <div class="card">
+    <div class="card-header"><span class="card-title">Signals &amp; Pipeline</span><span id="sig-regime" class="card-badge">—</span></div>
+    <div class="card-body">
+      <div id="pipeline-stats"></div>
+    </div>
+  </div>
+
+  <!-- System (full-width) -->
+  <div class="card full-width">
+    <div class="card-header"><span class="card-title">System Health</span><span id="sys-session" class="card-badge">—</span></div>
+    <div class="card-body">
+      <div class="arms-grid" id="arms-grid"></div>
+      <div id="sys-stats"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">U.T.S. — Unified Trading System &middot; Dashboard auto-refreshes every 3s</div>
+
+<script>
+/* ── Config ────────────────────────────────────────────── */
+const POLL_MS = 3000;
+const DATA_URL = 'live_status.json';
+
+/* ── Helpers ──────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const fmt = (n, d=2) => n == null ? '—' : Number(n).toFixed(d);
+const fmtDollar = n => {
+  if (n == null) return '—';
+  const v = Number(n);
+  const s = Math.abs(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  return (v < 0 ? '-$' : '$') + s;
+};
+const fmtPct = (n, d=1) => n == null ? '—' : (Number(n)*100).toFixed(d) + '%';
+const pnlClass = v => v > 0.005 ? 'positive' : v < -0.005 ? 'negative' : 'neutral';
+const pnlTd = v => `<td class="num ${v > 0.005 ? 'pnl-pos' : v < -0.005 ? 'pnl-neg' : ''}">${fmtDollar(v)}</td>`;
+const fmtAge = s => {
+  if (s == null) return 'never';
+  if (s < 60) return s.toFixed(0) + 's';
+  if (s < 3600) return (s/60).toFixed(0) + 'm';
+  return (s/3600).toFixed(1) + 'h';
+};
+const fmtUptime = s => {
+  if (s == null) return '—';
+  const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60);
+  const sec = Math.floor(s%60);
+  return `${h}h ${m}m ${sec}s`;
+};
+const timeStr = ts => {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  } catch { return '—'; }
+};
+const evtTag = (type, status) => {
+  if (type === 'PAPER_FILL' || status === 'FILLED') return '<span class="tag tag-fill">FILL</span>';
+  if (type === 'REJECTED' || status === 'RISK_BLOCK') return '<span class="tag tag-reject">REJECT</span>';
+  if (type === 'WORKING' || status === 'PENDING') return '<span class="tag tag-work">WORK</span>';
+  return `<span class="tag tag-bucket">${type||status||'?'}</span>`;
+};
+
+let lastData = null;
+let failCount = 0;
+
+/* ── Render ───────────────────────────────────────────── */
+function render(d) {
+  lastData = d;
+  const pnl = d.pnl || {};
+  const ks = d.kill_switch || {};
+  const alloc = d.allocation || {};
+  const bu = alloc.bucket_usage || {};
+  const ai = d.agent_intel || {};
+
+  /* Header */
+  $('hdr-session').textContent = d.session_type || d.session_id || '';
+  const mode = (d.mode||'PAPER').toUpperCase();
+  $('hdr-mode').textContent = mode;
+  $('hdr-mode').className = 'mode-badge ' + (mode === 'LIVE' ? 'live' : 'paper');
+  $('hdr-time').textContent = timeStr(d.timestamp_utc);
+
+  /* Kill switch */
+  const killActive = ks.kill_switch === true;
+  $('kill-banner').className = 'kill-banner' + (killActive ? ' active' : '');
+
+  /* KPIs */
+  const total = pnl.total ?? 0;
+  $('kpi-total').textContent = fmtDollar(total);
+  $('kpi-total').className = 'kpi-value ' + pnlClass(total);
+  $('kpi-total-sub').textContent = d.equity > 0 ? fmtPct(total / d.equity) + ' of equity' : '';
+  $('kpi-real').textContent = fmtDollar(pnl.realized);
+  $('kpi-real').className = 'kpi-value ' + pnlClass(pnl.realized);
+  $('kpi-unreal').textContent = fmtDollar(pnl.unrealized);
+  $('kpi-unreal').className = 'kpi-value ' + pnlClass(pnl.unrealized);
+  $('kpi-trades').textContent = d.total_trades ?? '—';
+  const wr = d.win_rate;
+  $('kpi-wr').textContent = wr != null ? fmtPct(wr,1) : '—';
+  $('kpi-wr').className = 'kpi-value ' + (wr > 0.5 ? 'positive' : wr != null && wr < 0.4 ? 'negative' : 'neutral');
+  $('kpi-pos').textContent = d.active_positions ?? 0;
+  $('kpi-pos-sub').textContent = bu.max_total ? `of ${bu.max_total} max` : '';
+  $('kpi-uptime').textContent = fmtUptime(d.uptime_seconds);
+  $('kpi-cycle-sub').textContent = d.loop_count ? `cycle ${d.loop_count}` : '';
+
+  /* Positions table */
+  const trades = d.recent_trades || [];
+  $('pos-count').textContent = trades.length;
+  $('pos-body').innerHTML = trades.length === 0
+    ? '<tr><td colspan="7" style="text-align:center;color:var(--text3)">No open positions</td></tr>'
+    : trades.map(t => `<tr>
+        <td class="sym">${esc(t.symbol)}</td>
+        <td>${esc(t.side)}</td>
+        <td class="num">${t.qty}</td>
+        <td class="num">${fmt(t.entry)}</td>
+        <td class="num">${fmt(t.current)}</td>
+        ${pnlTd(t.pnl)}
+        <td class="num">${fmt(t.r_mult,2)}</td>
+      </tr>`).join('');
+
+  /* Recent events */
+  const evts = (d.recent_events || []).slice().reverse();
+  $('evt-count').textContent = evts.length;
+  $('evt-body').innerHTML = evts.length === 0
+    ? '<tr><td colspan="6" style="text-align:center;color:var(--text3)">No recent events</td></tr>'
+    : evts.map(e => `<tr>
+        <td>${timeStr(e.ts)}</td>
+        <td class="sym">${esc(e.symbol)}</td>
+        <td>${evtTag(e.type, e.status)}</td>
+        <td>${esc(e.status)}</td>
+        <td class="num">${e.qty||'—'}</td>
+        <td class="num">${e.price > 0 ? fmt(e.price) : '—'}</td>
+      </tr>`).join('');
+
+  /* Risk */
+  $('risk-posture').textContent = alloc.risk_posture || ks.atr_spike ? 'SPIKE' : '—';
+  const riskPct = (d.open_risk_total_pct || 0) * 100;
+  const ddPct = ks.max_drawdown > 0 ? ((ks.drawdown||0)/ks.max_drawdown)*100 : 0;
+  const tradesPct = ks.max_trades_hour > 0 ? ((ks.trades_this_hour||0)/ks.max_trades_hour)*100 : 0;
+  $('risk-meters').innerHTML = [
+    meterRow('Risk Util', riskPct, fmt(d.open_risk_total_pct*100,2)+'%'),
+    meterRow('Daily Loss', ddPct, fmtDollar(ks.drawdown)+' / '+fmtDollar(ks.max_drawdown)),
+    meterRow('Trades/Hr', tradesPct, (ks.trades_this_hour||0)+' / '+(ks.max_trades_hour||'—')),
+  ].join('');
+  $('risk-stats').innerHTML = [
+    statRow('Exposure', fmtDollar(ks.total_exposure)),
+    statRow('Symbols Exposed', ks.symbols_exposed ?? '—'),
+    statRow('Loss Streak', ks.loss_streak ?? 0),
+    statRow('Failed Orders', ks.failed_orders_1h ?? 0),
+    statRow('ATR Spike', ks.atr_spike ? '<span style="color:var(--red)">YES</span>' : 'No'),
+  ].join('');
+
+  /* Signals & Pipeline */
+  $('sig-regime').textContent = alloc.regime || d.regime || '—';
+  $('pipeline-stats').innerHTML = [
+    statRow('Signals Generated', d.signals_generated ?? '—'),
+    statRow('Intents Created', d.intents_created ?? '—'),
+    statRow('Orders Placed', d.orders_placed ?? '—'),
+    statRow('Risk Rejected', d.risk_rejected ?? '—'),
+    statRow('Blueprints Ready', d.blueprints_count ?? '—'),
+    statRow('Errors', d.errors ?? 0),
+    '<hr style="border:none;border-top:1px solid var(--border);margin:6px 0">',
+    statRow('Bucket: News', (bu.news??'—')),
+    statRow('Bucket: Rotation', (bu.rotation??'—')),
+    statRow('Bucket: Volatility', (bu.volatility??'—')),
+    statRow('Bucket: MeanRev', (bu.meanrevert??'—')),
+    statRow('Bucket: Total', `${bu.total??'—'} / ${bu.max_total??'—'}`),
+  ].join('');
+
+  /* System / Arms */
+  $('sys-session').textContent = d.session_type || '—';
+  const arms = d.arms || {};
+  $('arms-grid').innerHTML = ['ingest','signal','risk','execution','monitor'].map(a => {
+    const info = arms[a] || {};
+    const ok = info.status === 'ok';
+    return `<div class="arm-box ${ok?'ok':'miss'}">
+      <div class="arm-name">${a}</div>
+      <div class="arm-age" style="color:${ok?'var(--green)':'var(--red)'}">${fmtAge(info.last_seen_s)}</div>
+    </div>`;
+  }).join('');
+
+  $('sys-stats').innerHTML = [
+    statRow('Universe Size', d.universe_size ?? '—'),
+    statRow('Agent Intel', ai.loaded != null ? `${ai.loaded} symbols` : '—'),
+    ai.symbols && ai.symbols.length > 0
+      ? statRow('Intel Symbols', '<span style="font-size:.7rem;color:var(--text3)">' + ai.symbols.slice(0,12).map(s=>`<span class="sym" style="margin-right:4px">${esc(s)}</span>`).join('') + (ai.symbols.length>12?'…':'') + '</span>')
+      : '',
+    statRow('Working Orders', d.working_orders ?? '—'),
+    statRow('Armed', d.armed ? '<span style="color:var(--green)">YES</span>' : '<span style="color:var(--text3)">NO</span>'),
+    statRow('Market Open', d.market_open ? '<span style="color:var(--green)">YES</span>' : '<span style="color:var(--text3)">NO</span>'),
+    statRow('Mode', mode),
+    statRow('Backend', d.backend || '—'),
+  ].join('');
+}
+
+function meterRow(label, pct, valText) {
+  const p = Math.max(0, Math.min(100, pct));
+  const cls = p < 50 ? 'low' : p < 80 ? 'med' : 'high';
+  return `<div class="meter-row">
+    <span class="meter-label">${label}</span>
+    <div class="meter-track"><div class="meter-fill ${cls}" style="width:${p}%"></div></div>
+    <span class="meter-val">${valText}</span>
+  </div>`;
+}
+function statRow(label, val) {
+  return `<div class="stat-row"><span class="stat-label">${label}</span><span class="stat-val">${val}</span></div>`;
+}
+function esc(s) {
+  if (s == null) return '';
+  const el = document.createElement('span');
+  el.textContent = String(s);
+  return el.innerHTML;
+}
+
+/* ── Poll Loop ────────────────────────────────────────── */
+async function poll() {
+  try {
+    const r = await fetch(DATA_URL + '?t=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    render(d);
+    failCount = 0;
+    $('hdr-dot').className = 'status-dot ok';
+    $('hdr-conn').textContent = 'Connected';
+  } catch(e) {
+    failCount++;
+    if (failCount >= 3) {
+      $('hdr-dot').className = 'status-dot err';
+      $('hdr-conn').textContent = 'Disconnected';
+    }
+  }
+}
+
+setInterval(poll, POLL_MS);
+poll();
+</script>
+</body>
+</html>

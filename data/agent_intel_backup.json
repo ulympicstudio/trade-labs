@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-03-19T04:34:39.234620+00:00",
+  "session_date": "2026-03-18",
+  "model": "test",
+  "symbols": {
+    "AAPL": {
+      "catalyst_score": 5,
+      "catalyst_type": "PRODUCT_LAUNCH",
+      "sentiment": 0.3,
+      "risk_flags": [],
+      "conviction": "MEDIUM",
+      "ttl_minutes": 480
+    }
+  },
+  "market_context": {
+    "regime": "RISK_ON"
+  }
+}

@@ -46,7 +46,7 @@ def test_trail_bracket():
     print(f"  ok: {result.ok}")
     print(f"  message: {result.message}")
     print(f"  parent_id: {result.parent_id}")
-    print(f"  tp_id: {result.tp_id}")
+    print(f"  stop_id: {result.stop_id}")
     print(f"  trail_id: {result.trail_id}")
     
     # Check TWS

@@ -1,0 +1,117 @@
+{
+  "timestamp": "2026-03-16T23:49:48.219657+00:00",
+  "source": "playbook_latest.json",
+  "count": 10,
+  "top_candidates": [
+    {
+      "symbol": "AAPL",
+      "price": 195.9,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.593,
+      "total_score": 16.0,
+      "quality": "HIGH",
+      "latest_headline": "'Apple's Foldable iPhone to Feature iPad-Like Interface When Opened' - Bloomberg News"
+    },
+    {
+      "symbol": "MSFT",
+      "price": 420.19,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.481,
+      "total_score": 13.0,
+      "quality": "HIGH",
+      "latest_headline": "Stryker Confirms Cybersecurity Incident Disrupting Microsoft Environment; Systems Access Limited As Investigation And Re"
+    },
+    {
+      "symbol": "QQQ",
+      "price": 439.3,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.444,
+      "total_score": 12.0,
+      "quality": "HIGH",
+      "latest_headline": ""
+    },
+    {
+      "symbol": "NVDA",
+      "price": 134.5,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.407,
+      "total_score": 11.0,
+      "quality": "HIGH",
+      "latest_headline": ""
+    },
+    {
+      "symbol": "AMZN",
+      "price": 100.05,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.259,
+      "total_score": 7.0,
+      "quality": "HIGH",
+      "latest_headline": ""
+    },
+    {
+      "symbol": "CRM",
+      "price": 99.91,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.222,
+      "total_score": 6.0,
+      "quality": "MED",
+      "latest_headline": "'Investors demand steep concessions in Salesforce's $25bn bond deal' - Financial Times"
+    },
+    {
+      "symbol": "CF",
+      "price": 99.98,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.222,
+      "total_score": 6.0,
+      "quality": "MED",
+      "latest_headline": "Analyst Jim Wyckoff Says Gold Is A Crowded Trade\u2014Here's What Smart Money's Buying"
+    },
+    {
+      "symbol": "EERGF",
+      "price": 100.14,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.222,
+      "total_score": 6.0,
+      "quality": "MED",
+      "latest_headline": "Energean Acquires Chevron's 31% Operated Interest In Angola's Block 14 And 15.5% In Block 14K For $260M Base Considerati"
+    },
+    {
+      "symbol": "CAT",
+      "price": 100.03,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.222,
+      "total_score": 6.0,
+      "quality": "MED",
+      "latest_headline": "$100 Invested In Caterpillar 15 Years Ago Would Be Worth This Much Today"
+    },
+    {
+      "symbol": "CVX",
+      "price": 99.94,
+      "rsi": null,
+      "volume_spike_pct": 0.0,
+      "premarket_change_pct": null,
+      "confidence": 0.222,
+      "total_score": 6.0,
+      "quality": "MED",
+      "latest_headline": "Energean Acquires Chevron's 31% Operated Interest In Angola's Block 14 And 15.5% In Block 14K For $260M Base Considerati"
+    }
+  ]
+}
