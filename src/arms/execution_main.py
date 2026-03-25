@@ -44,6 +44,7 @@ from src.risk.exit_intelligence import (
     TRIM_25 as _TRIM_25,
     TRIM_50 as _TRIM_50,
     EXIT_FULL as _EXIT_FULL,
+    TIGHTEN_STOP as _TIGHTEN_STOP,
 )
 from src.analysis.pnl_attribution import (
     record_open as _attrib_open,
@@ -77,6 +78,8 @@ _SIM_FRICTION = os.environ.get(
 _SIM_DELAY_MS = int(os.environ.get("TL_EXEC_SIM_DELAY_MS", "250"))
 _SIM_SLIPPAGE_BPS = float(os.environ.get("TL_EXEC_SIM_SLIPPAGE_BPS", "2"))
 _SIM_PARTIAL_FILL_PCT = float(os.environ.get("TL_EXEC_SIM_PARTIAL_FILL_PCT", "0.6"))
+
+_LIVE_TRADING_ENABLED = os.getenv("TL_LIVE_TRADING", "0") == "1"
 
 # ── PAPER slippage model (H) ────────────────────────────────────────
 _SLIPPAGE_MULT = float(os.environ.get("TL_EXEC_SLIPPAGE_MULT", "0.05"))
@@ -413,7 +416,8 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
             if _SC_ENABLED:
                 _bp_intent = getattr(bp, "intent_id", "")
                 if _bp_intent:
-                    _sc_dev_close(_bp_intent, avg_price, bp.qty)
+                    _sc_dev_close(_bp_intent, avg_price, bp.qty,
+                                  slippage_bps=_actual_slip_bps)
             # Exit intelligence: register position for exit tracking
             if _EXIT_ENABLED:
                 _exit_register(
@@ -723,10 +727,11 @@ def main() -> None:
         )
 
     log.info(
-        "Execution arm starting  mode=%s  allow_extended=%s  execution_enabled=%s  heartbeat=%ss",
+        "Execution arm starting  mode=%s  allow_extended=%s  execution_enabled=%s  live_flag=%s  heartbeat=%ss",
         settings.trade_mode.value,
         _ALLOW_EXTENDED,
         _EXECUTION_ENABLED,
+        _LIVE_TRADING_ENABLED,
         settings.heartbeat_interval_s,
     )
 
@@ -753,9 +758,15 @@ def main() -> None:
         _exit_closes_this_tick: list = []
         if _EXIT_ENABLED:
             from src.risk.exit_intelligence import _positions as _exit_positions
+            # Pull real last prices from ingest cache
+            try:
+                from src.arms.ingest_main import _SYNTH_PREV_LAST as _real_prices
+            except Exception:
+                _real_prices = {}
             for _esym, _epos in list(_exit_positions.items()):
-                # Dev mode: simulate small price drift from entry so PnL is non-zero
-                _dev_px = _epos.entry_price * (1.0 + 0.005 * (tick % 10))
+                # Use real ingest price; fall back to synthetic drift if unavailable
+                _real_px = _real_prices.get(_esym.upper()) or _real_prices.get(_esym)
+                _dev_px = _real_px if (_real_px and _real_px > 0) else                           _epos.entry_price * (1.0 + 0.005 * (tick % 10))
                 _edecision = _exit_update(_esym, _dev_px)
                 # Feed mark to attribution
                 if _ATTRIB_ENABLED:
@@ -764,7 +775,7 @@ def main() -> None:
                                  mae=_epos.max_adverse_excursion,
                                  r_multiple=_epos.r_multiple)
                 # Process exit actions (TRIM / EXIT_FULL)
-                if _edecision and _edecision.action in (_TRIM_25, _TRIM_50, _EXIT_FULL):
+                if _edecision and _edecision.action in (_TRIM_25, _TRIM_50, _EXIT_FULL, _TIGHTEN_STOP):
                     _exit_closes_this_tick.append((_esym, _epos, _edecision))
 
             # Execute closes outside iteration to avoid dict-size-changed
@@ -788,8 +799,71 @@ def main() -> None:
                         intent_id=_cpos.intent_id,
                         exit_price=_exit_px,
                         pnl=_exit_pnl,
+                        mfe=getattr(_cpos, "max_favorable_excursion", 0.0),
+                        mae=getattr(_cpos, "max_adverse_excursion", 0.0),
                     )
+                # iMessage exit alert
+                try:
+                    from src.arms.monitor_main import _alert_exit as _mx_exit
+                    from src.signals.reentry_harvester import is_in_window as _reh_window
+                    _mx_exit(
+                        symbol=_csym,
+                        qty=getattr(_cpos, "qty", 0),
+                        pnl=_exit_pnl,
+                        r_multiple=getattr(_cpos, "r_multiple", 0.0),
+                        exit_action=_cdec.action,
+                        bucket=getattr(_cpos, "playbook", ""),
+                        reentry_open=_reh_window(_csym),
+                    )
+                except Exception:
+                    pass
+                # iMessage exit alert
+                try:
+                    from src.arms.monitor_main import _alert_exit as _mx_exit
+                    from src.signals.reentry_harvester import is_in_window as _reh_window
+                    _mx_exit(
+                        symbol=_csym,
+                        qty=getattr(_cpos, "qty", 0),
+                        pnl=_exit_pnl,
+                        r_multiple=getattr(_cpos, "r_multiple", 0.0),
+                        exit_action=_cdec.action,
+                        bucket=getattr(_cpos, "playbook", ""),
+                        reentry_open=_reh_window(_csym),
+                    )
+                except Exception:
+                    pass
                 # Full exit: remove from exit tracking
+                # ── TIGHTEN_STOP: modify trailing stop on IBKR ─────────
+                if _cdec.action == _TIGHTEN_STOP:
+                    _new_trail = _cdec.trail_pct
+                    log.info(
+                        "tighten_stop symbol=%s new_trail_pct=%.3f reasons=%s",
+                        _csym, _new_trail, _cdec.reason_codes,
+                    )
+                    # Update position state so future tightens compound
+                    _cpos.trail_pct = _new_trail
+                    # Modify IBKR trailing stop if live connection exists
+                    try:
+                        from src.arms.execution_main import _ib
+                        if _ib is not None and _ib.isConnected():
+                            for _ord in _ib.trades():
+                                if (hasattr(_ord, 'contract') and
+                                        _ord.contract.symbol == _csym and
+                                        hasattr(_ord, 'order') and
+                                        getattr(_ord.order, 'orderType', '') == 'TRAIL'):
+                                    _ord.order.trailingPercent = _new_trail
+                                    _ib.placeOrder(_ord.contract, _ord.order)
+                                    log.info(
+                                        "ibkr_trail_modified symbol=%s trail_pct=%.3f orderId=%s",
+                                        _csym, _new_trail,
+                                        getattr(_ord.order, 'orderId', '?'),
+                                    )
+                                    break
+                    except Exception as _te:
+                        log.warning("tighten_stop_ibkr_err symbol=%s err=%s", _csym, _te)
+                    # Skip attribution/scorecard close — position still open
+                    continue
+
                 if _cdec.action == _EXIT_FULL:
                     _exit_unregister(_csym)
 

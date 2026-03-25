@@ -114,10 +114,17 @@ from src.universe.scan_scheduler import (
     HIGH as _SCAN_HIGH,
 )
 from src.signals.sector_intel import get_sector_score as _get_sector_score
+from src.analysis.playbook_scorecard import is_loss_streak_blocked as _sc_streak_blocked
+from src.signals.reentry_harvester import (
+    get_reentry_boost as _reentry_get_boost,
+    REENTRY_ENABLED as _REENTRY_ENABLED,
+)
 from src.signals.industry_rotation import get_industry_score as _get_industry_score
 from src.analysis.playbook_scorecard import (
     get_priority_bias as _sc_priority_bias,
     get_scorecard_summary as _sc_summary,
+    get_loss_streak as _sc_get_loss_streak,
+    _sc_get_card_internal,
     SCORECARD_ENABLED as _SC_ENABLED,
 )
 from src.analysis.self_tuning import (
@@ -150,6 +157,11 @@ _SPREAD_MAX_PCT = float(os.environ.get("TL_SIG_SPREAD_MAX_PCT", "0.003"))  # 0.3
 _CONFIDENCE_BASE = float(os.environ.get("TL_SIG_CONFIDENCE_BASE", "0.70"))
 _CONFIDENCE_NEWS_BOOST = float(os.environ.get("TL_SIG_NEWS_BOOST", "0.10"))
 _ATR_STOP_MULT = float(os.environ.get("TL_SIG_ATR_STOP_MULT", "2.0"))
+# Per-strategy ATR stop multipliers (override global)
+_ATR_MULT_MOMENTUM  = float(os.environ.get("TL_ATR_MULT_MOMENTUM",  "1.8"))  # tight — momentum fades fast
+_ATR_MULT_RSI       = float(os.environ.get("TL_ATR_MULT_RSI",       "2.0"))  # standard mean-revert
+_ATR_MULT_CONSENSUS = float(os.environ.get("TL_ATR_MULT_CONSENSUS",  "2.2"))  # wider — news moves volatile
+_ATR_MULT_VOL       = float(os.environ.get("TL_ATR_MULT_VOL",        "2.5"))  # widest — breakout needs room
 _COOLDOWN_S = float(os.environ.get("TL_SIG_COOLDOWN_S", "60"))  # min seconds between intents per symbol
 _COOLDOWN_CONSENSUS_S = float(os.environ.get("TL_SIG_COOLDOWN_CONSENSUS_S", "300"))  # longer cooldown after consensus-driven intent
 _CONFIDENCE_CONSENSUS_BOOST = float(os.environ.get("TL_SIG_CONSENSUS_CONF_BOOST", "0.15"))  # extra confidence for consensus events
@@ -158,7 +170,7 @@ _CONSENSUS_MIN_PROVIDERS = int(os.environ.get("TL_SIG_CONSENSUS_MIN_PROVIDERS", 
 _CONSENSUS_MIN_IMPACT = int(os.environ.get("TL_SIG_CONSENSUS_MIN_IMPACT", "3"))
 _CACHE_MAX_SNAPS = int(os.environ.get("TL_SIG_CACHE_MAX_SNAPS", "50"))
 _CACHE_MAX_NEWS = int(os.environ.get("TL_SIG_CACHE_MAX_NEWS", "20"))
-_NEWS_RECENCY_S = float(os.environ.get("TL_SIG_NEWS_RECENCY_S", "300"))  # 5 min
+_NEWS_RECENCY_S = float(os.environ.get("TL_SIG_NEWS_RECENCY_S", "1800"))  # 30 min — keeps catalyst alive across full scan cycle
 _FORCE_INTENT = os.environ.get("SIGNAL_FORCE_INTENT", "false").lower() in ("1", "true", "yes")
 _FORCE_INTENT_INTERVAL_S = float(os.environ.get("TL_TEST_FORCE_INTENT_INTERVAL", "60"))  # emit a forced intent every N seconds
 
@@ -355,6 +367,10 @@ class SymbolCache:
     last_sector_score: float = 0.0
     last_industry_score: float = 0.0
     last_market_score: float = 0.0
+
+    # RSI persistence — last valid RTH rsi14 for fallback when bars are insufficient
+    last_known_rsi: Optional[float] = None
+    last_known_rsi_date: Optional[str] = None   # ET date str YYYY-MM-DD
 
     # Phase B: scan priority
     scan_priority: str = "NORMAL"
@@ -619,6 +635,48 @@ def _handle_signal(signum, _frame):
 
 # ── Cache helpers ────────────────────────────────────────────────────
 
+def _scorecard_cap_adj(bucket: str, cap_mult: float) -> float:
+    """Reduce cap_mult when a bucket is on a losing streak."""
+    card = _sc_get_card_internal(bucket)
+    streak = _sc_get_loss_streak(bucket)
+    if card is None or streak == 0:
+        return cap_mult
+    scale = 1.0 if streak < 1 else (0.75 if streak < 3 else (0.50 if streak < 5 else 0.25))
+    adjusted = round(cap_mult * scale, 3)
+    return adjusted
+
+
+def _fetch_historical_bars(symbol: str, bar_size: str = "1 min", lookback: int = 20) -> list:
+    """
+    Fetch historical bars from IBKR for RSI pre-seeding.
+    Returns list of close prices (float), newest last.
+    Returns [] if TWS is unavailable — caller handles gracefully.
+    """
+    try:
+        from src.broker.ib_session import get_ib
+        from ib_insync import Stock
+        ib   = get_ib()
+        contract = Stock(symbol, "SMART", "USD")
+        # duration: 1 day covers 390 min bars (full RTH session)
+        duration = f"{lookback + 5} S" if "sec" in bar_size else "2 D"
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=1,
+            keepUpToDate=False,
+        )
+        closes = [b.close for b in bars if b.close > 0]
+        log.debug("_fetch_historical_bars sym=%s bars=%d", symbol, len(closes))
+        return closes[-lookback:] if len(closes) > lookback else closes
+    except Exception as exc:
+        log.debug("_fetch_historical_bars unavailable sym=%s err=%s", symbol, exc)
+        return []
+
+
 def _get_cache(symbol: str) -> SymbolCache:
     """Return (or create) the rolling cache for *symbol*."""
     if symbol not in _cache:
@@ -633,7 +691,7 @@ def _recent_news_sentiment(sc: SymbolCache) -> Optional[float]:
     for n in reversed(sc.news):
         age = now - n.ts.timestamp() if hasattr(n.ts, "timestamp") else _NEWS_RECENCY_S + 1
         if age > _NEWS_RECENCY_S:
-            break
+            continue  # skip stale; deque may be out-of-order
         if n.sentiment is not None:
             scores.append(n.sentiment)
     return (sum(scores) / len(scores)) if scores else None
@@ -649,7 +707,7 @@ def _recent_consensus_count(sc: SymbolCache) -> int:
     for n in reversed(sc.news):
         age = now - n.ts.timestamp() if hasattr(n.ts, "timestamp") else _NEWS_RECENCY_S + 1
         if age > _NEWS_RECENCY_S:
-            break
+            continue  # skip stale; deque may be out-of-order
         for tag in (n.impact_tags or []):
             if tag.startswith("CONSENSUS:"):
                 try:
@@ -1963,6 +2021,19 @@ def _on_snapshot(snap: MarketSnapshot) -> None:
     global _first_snapshot_logged
     now = time.time()
 
+    # ── RSI pre-seed on first snapshot for this symbol ────────────
+    if snap.rsi14 is None:
+        _sc_tmp = _get_cache(snap.symbol)
+        if _sc_tmp.last_known_rsi is None:
+            bars = _fetch_historical_bars(snap.symbol, bar_size="1 min", lookback=20)
+            if bars:
+                from src.signals.indicators import compute_rsi as _compute_rsi
+                _pre_rsi = _compute_rsi(bars, period=14)
+                if _pre_rsi is not None:
+                    snap.rsi14 = _pre_rsi
+                    _sc_tmp.last_known_rsi = _pre_rsi
+                    log.debug("rsi_pre_seed sym=%s rsi14=%.1f from %d bars", snap.symbol, _pre_rsi, len(bars))
+
     # Log first receipt once per run
     if not _first_snapshot_logged:
         _first_snapshot_logged = True
@@ -2070,6 +2141,24 @@ def _on_news(news: NewsEvent) -> None:
             getattr(news, "source_provider", "?"),
             news.headline[:80],
         )
+    # ── News-triggered re-evaluation ────────────────────────────────
+    # For high-impact news, immediately re-score the symbol using the
+    # last known snapshot rather than waiting for the next scan cycle.
+    _news_impact = getattr(news, "impact_score", 0) or 0
+    if _news_impact >= 3 or _has_consensus:
+        with _lock:
+            _sc = _get_cache(news.symbol)
+            _last_snap = _sc.snapshots[-1] if _sc.snapshots else None
+        if _last_snap is not None:
+            try:
+                _evaluate(_last_snap, _sc)
+                log.debug(
+                    "news_triggered_eval symbol=%s impact=%d consensus=%s",
+                    news.symbol, _news_impact, _has_consensus,
+                )
+            except Exception as _e:
+                log.warning("news_triggered_eval_error symbol=%s err=%s", news.symbol, _e)
+
     else:
         log.debug(
             "News cached  symbol=%s  source=%s  sentiment=%s",
@@ -2258,7 +2347,7 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
     for _n in reversed(sc.news):
         _nts = _n.ts.timestamp() if hasattr(_n.ts, "timestamp") else 0
         if _nts < _cutoff:
-            break
+            continue  # skip stale; don't break — deque may be out-of-order
         _imp = getattr(_n, "impact_score", 0) or 0
         if _imp > _best_impact:
             _best_impact = _imp
@@ -2445,6 +2534,7 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
         symbol=snap.symbol,
         event_score=_es.event_score,
         sector_state=_sa.sector_state,
+        sector_score=sc.last_sector_score,
         rotation_state=_rot.rotation_state,
         rotation_score=_rot.rotation_score,
         vol_state=_vl.leader_state,
@@ -2454,9 +2544,15 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
         session=_session_now,
         decision=_alloc_d,
     )
-    sc.last_priority = _conf.priority_score
     sc.last_confluence = _conf.confluence_score
     sc.last_bucket = _conf.bucket
+
+    # ── Scorecard cap_mult feedback ───────────────────────────────────
+    cap_mult = _mm_d.position_cap_mult if _mm_d else 1.0
+    if _SC_ENABLED and _conf.bucket != "none":
+        cap_mult = _scorecard_cap_adj(_conf.bucket, cap_mult)
+        log.info("scorecard_cap_adj bucket=%s streak=%d cap_mult=%.3f", _conf.bucket, _sc_get_loss_streak(_conf.bucket), cap_mult)
+
     if _conf.priority_score > 0:
         log.info(
             "symbol_priority sym=%s priority=%.1f confluence=%.2f "
@@ -2482,23 +2578,37 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
     if _SC_ENABLED and _conf.bucket != "none":
         _sc_bias = _sc_priority_bias(_conf.bucket)
         if _sc_bias != 0.0:
-            _conf_priority_adj = _conf.priority_score + _sc_bias
+            _old_pri = _conf.priority_score
+            _conf.priority_score = round(_conf.priority_score + _sc_bias, 2)
             log.info(
                 "scorecard_fit sym=%s bucket=%s bias=%+.1f priority=%.1f→%.1f",
                 snap.symbol, _conf.bucket, _sc_bias,
-                _conf.priority_score, _conf_priority_adj,
+                _old_pri, _conf.priority_score,
             )
 
     # ── Self-Tuning: priority bias nudge ─────────────────────────────
     if _TUNING_ENABLED and _conf.bucket != "none":
         _tp_nudge = _tune_priority(_conf.bucket)
         if _tp_nudge != 0.0:
-            _adj_pri = max(0.0, _conf.priority_score + _tp_nudge)
+            _old_pri = _conf.priority_score
+            _conf.priority_score = round(max(0.0, _conf.priority_score + _tp_nudge), 2)
             log.info(
                 "tuned_priority_bias sym=%s bucket=%s nudge=%+.2f priority=%.1f→%.1f",
                 snap.symbol, _conf.bucket, _tp_nudge,
-                _conf.priority_score, _adj_pri,
+                _old_pri, _conf.priority_score,
             )
+
+    # ── Re-entry harvester boost ──────────────────────────────────────
+    if _REENTRY_ENABLED:
+        _reentry_boost = _reentry_get_boost(snap.symbol)
+        if _reentry_boost > 0.0:
+            _old_pri = _conf.priority_score
+            _conf.priority_score = round(_conf.priority_score + _reentry_boost, 2)
+            log.info(
+                "reentry_boost_applied sym=%s boost=%.1f priority=%.1f→%.1f",
+                snap.symbol, _reentry_boost, _old_pri, _conf.priority_score,
+            )
+    sc.last_priority = _conf.priority_score
 
     # ── Self-Tuning: event threshold nudge ───────────────────────────
     if _TUNING_ENABLED and _conf.bucket != "none":
@@ -2519,6 +2629,15 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
         )
         sc.last_composite_score = _comp.composite_score
         sc.last_sector_score = _comp.sector_score
+        # Persist last valid RSI for fallback when intraday bars insufficient
+        if snap.rsi14 is not None:
+            sc.last_known_rsi = snap.rsi14
+            from src.market.session import _to_et
+            from datetime import timezone
+            import datetime as _dt
+            sc.last_known_rsi_date = _to_et(
+                _dt.datetime.now(timezone.utc)
+            ).strftime("%Y-%m-%d")
         sc.last_industry_score = _comp.industry_score
         sc.last_market_score = _comp.market_score
         if _comp.composite_score > 30:
@@ -2572,18 +2691,57 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
             _blocked_reasons.clear()
 
     # ── D: Regime gate helper (per-strategy) ────────────────────────
+    # Accumulate scorecard bias + tuning nudge into effective gate reduction
+    _bias_total = 0.0
+    if _SC_ENABLED and _conf.bucket != "none":
+        _bias_total += _sc_priority_bias(_conf.bucket)
+    if _TUNING_ENABLED and _conf.bucket != "none":
+        _bias_total += _tune_threshold(_conf.bucket)
+    # Each +10 bias points reduces the gate minimum by 1 (capped at -5)
+    _gate_reduction = int(max(-5.0, min(0.0, -abs(_bias_total) * 0.1 if _bias_total > 0 else 0.0)))
+
     def _gated(strat: str) -> bool:
         """Check both event-score gate AND regime gate.  Log skip."""
+        _base_min = {"DEV_MOMENTUM": _ES_MIN_DEV, "mean_revert_rsi": _ES_MIN_RSI,
+                     "consensus_news": _ES_MIN_CONSENSUS,
+                     "volatility_breakout": _ES_MIN_VOL}.get(strat, 0)
+        # ── Regime-adaptive gate: relax thresholds in low-activity regimes ──
+        _regime_adj = 0
+        _current_regime = _regime.regime if _regime else "UNKNOWN"
+        if strat == "consensus_news":
+            if _current_regime in ("CHOP", "RANGE"):
+                _regime_adj = -13   # 45 → 32: CHOP has fewer catalysts, relax
+            elif _current_regime == "BEAR":
+                _regime_adj = -8    # 45 → 37: still cautious in bear
+        elif strat == "mean_revert_rsi":
+            if _current_regime in ("CHOP", "RANGE"):
+                _regime_adj = -8    # 35 → 27: RSI mean-revert is primary CHOP edge
+        elif strat == "volatility_breakout":
+            if _current_regime in ("TREND", "BREAKOUT"):
+                _regime_adj = -5    # 30 → 25: vol breakout thrives in trend
+            elif _current_regime == "CHOP":
+                _regime_adj = +5    # 30 → 35: tighten vol gate in CHOP
+        _effective_min = max(10, _base_min + _gate_reduction + _regime_adj)
+        if _gate_reduction != 0:
+            log.debug(
+                "gate_bias_applied sym=%s strat=%s base_min=%d bias=%.1f effective_min=%d",
+                snap.symbol, strat, _base_min, _bias_total, _effective_min,
+            )
         if not _check_event_gate(snap.symbol, strat, sc.last_event_score,
-                                 {"DEV_MOMENTUM": _ES_MIN_DEV, "mean_revert_rsi": _ES_MIN_RSI,
-                                  "consensus_news": _ES_MIN_CONSENSUS,
-                                  "volatility_breakout": _ES_MIN_VOL}.get(strat, 0),
-                                 _es.reasons):
+                                 _effective_min, _es.reasons):
             return False
         if not _regime_allows(strat, _regime.regime):
             log.debug(
                 "regime_gate_skip regime=%s setup=%s symbol=%s",
                 _regime.regime, strat, snap.symbol,
+            )
+            return False
+        # Loss streak gate — block bucket after 3 consecutive losses
+        _STREAK_MAX = int(os.environ.get("TL_LOSS_STREAK_MAX", "3"))
+        if _SC_ENABLED and _conf.bucket != "none" and _sc_streak_blocked(_conf.bucket, _STREAK_MAX):
+            log.info(
+                "loss_streak_gate_skip sym=%s bucket=%s streak>=%d",
+                snap.symbol, _conf.bucket, _STREAK_MAX,
             )
             return False
         return True
@@ -2705,7 +2863,7 @@ def _evaluate_dev_momentum(snap: MarketSnapshot, sc: SymbolCache, now: float) ->
         confidence=conf,
         entry_zone_low=round(snap.bid, 2),
         entry_zone_high=round(snap.ask, 2),
-        invalidation=round(snap.last * 0.995, 2),
+        invalidation=round(snap.last - (snap.atr if snap.atr > 0 else snap.last * 0.01) * _ATR_MULT_MOMENTUM, 2),
         reason_codes=reason_codes,
     )
 
@@ -2716,12 +2874,21 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     """RSI mean-reversion: RSI<threshold + price>VWAP + tight spread → LONG."""
     symbol = snap.symbol
 
-    # ── Guard: need RSI to be present ───────────────────────────────
-    if snap.rsi14 is None:
+    # ── Guard: use live RSI or fall back to last known RTH value ───────
+    _rsi = snap.rsi14 if snap.rsi14 is not None else sc.last_known_rsi
+    if _rsi is None:
         return
+    # Staleness check: if RSI is from a prior session, apply confidence haircut
+    _rsi_is_stale = False
+    if snap.rsi14 is None and sc.last_known_rsi is not None:
+        from src.market.session import _to_et
+        from datetime import timezone
+        import datetime as _dt
+        _today_et = _to_et(_dt.datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        _rsi_is_stale = (sc.last_known_rsi_date != _today_et)
 
     # ── Condition 1: RSI oversold ───────────────────────────────────
-    if snap.rsi14 >= _RSI_THRESHOLD:
+    if _rsi >= _RSI_THRESHOLD:
         return
 
     # ── Condition 2: price above VWAP (mean-reversion bounce) ──────
@@ -2745,6 +2912,8 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
 
     # ── All conditions met — build confidence ───────────────────────
     confidence = _CONFIDENCE_BASE
+    if _rsi_is_stale:
+        confidence *= 0.60   # prior-session RSI: treat as soft bias, not fresh signal
 
     # Boost for positive recent news sentiment
     sentiment = _recent_news_sentiment(sc)
@@ -2761,10 +2930,10 @@ def _evaluate_rsi(snap: MarketSnapshot, sc: SymbolCache, now: float) -> None:
     entry_mid = snap.last
     entry_zone_low = round(entry_mid - atr * 0.25, 2)
     entry_zone_high = round(entry_mid + atr * 0.25, 2)
-    invalidation = round(entry_mid - atr * _ATR_STOP_MULT, 2)
+    invalidation = round(entry_mid - atr * _ATR_MULT_RSI, 2)
 
     reason_codes = [
-        f"rsi14={snap.rsi14:.1f}",
+        f"rsi14={_rsi:.1f}",
         f"above_vwap={snap.last:.2f}>{snap.vwap:.2f}",
         f"spread={spread_pct:.4f}",
     ]
@@ -2866,7 +3035,8 @@ def _evaluate_consensus_news(snap: MarketSnapshot, sc: SymbolCache, now: float) 
     half = round(max(0.01, (snap.ask - snap.bid) * 0.5), 2)
     entry_zone_low = round(mid - half, 2)
     entry_zone_high = round(mid + half, 2)
-    invalidation = round(snap.last * 0.99, 2)  # 1% stop — conservative
+    _con_atr = snap.atr if snap.atr > 0 else snap.last * 0.012
+    invalidation = round(snap.last - _con_atr * _ATR_MULT_CONSENSUS, 2)
 
     reason_codes = [
         "consensus_only",

@@ -37,6 +37,7 @@ from src.schemas.messages import (
     OpenPlanCandidate, PlanDraft, OrderBlueprint,
 )
 from src.market.session import get_us_equity_session, PREMARKET, is_test_session_forced, get_test_force_session
+from src.risk.session_gate import check_session_gate as _check_session_gate
 from src.risk.kill_switch import (
     check_circuit_breakers as _check_breakers,
     record_trade as _record_breaker_trade,
@@ -154,6 +155,9 @@ _intents_received = 0
 _approved = 0
 _rejected = 0
 _drafts = 0
+_draft_store: "dict[str, tuple]" = {}   # symbol → (PlanDraft, OpenPlanCandidate)
+_DRAFT_TTL_S: float = float(__import__('os').environ.get("TL_DRAFT_TTL_S", "300"))  # 5-min TTL
+_draft_store_ts: "dict[str, float]" = {}  # symbol → epoch timestamp
 _blueprints = 0
 _lock = threading.Lock()
 
@@ -163,6 +167,23 @@ _DEFAULT_OPEN_RISK_USD = float(os.environ.get("TL_OPEN_RISK", "0"))
 _DEFAULT_RISK_PCT = float(os.environ.get("TL_RISK_PER_TRADE_PCT", "0.005"))
 _DEFAULT_ATR_MULT = float(os.environ.get("TL_ATR_MULTIPLIER", "2.0"))
 _DEFAULT_TRAIL_PCT = float(os.environ.get("TL_TRAIL_PCT", "1.5"))
+
+def _adaptive_trail_pct(bucket: str) -> float:
+    """Scale trail_pct from scorecard avg_r_multiple per bucket.
+    avg_r <1.0 → tight trail; avg_r >2.0 → wide trail; cold start → default."""
+    _TRAIL_MIN, _TRAIL_MAX = 0.8, 3.0
+    if not _SC_ENABLED or bucket == "none":
+        return _DEFAULT_TRAIL_PCT
+    card = _sc_get_card(bucket)
+    if card is None or getattr(card, "sample_n", 0) < 10:
+        return _DEFAULT_TRAIL_PCT
+    scaled = _TRAIL_MIN + (card.avg_r_multiple - 1.0) * 1.7
+    result = round(max(_TRAIL_MIN, min(_TRAIL_MAX, scaled)), 2)
+    log.debug(
+        "adaptive_trail bucket=%s avg_r=%.2f trail_pct=%.2f",
+        bucket, card.avg_r_multiple, result,
+    )
+    return result
 
 # Volatility-aware stop defaults for OFF_HOURS PlanDrafts
 _VOL_STOP_MIN_PCT = 0.004   # 0.4 %
@@ -269,8 +290,29 @@ def _on_trade_intent(intent: TradeIntent) -> None:
         _publish_rejected(intent, ["zero_shares"])
         return
 
-    # ── 2b. Enforce MAX_RISK_USD_PER_TRADE cap ───────────────────────
+    # ── 2a. Session gate — time-of-day quality filter ────────────────
+    _gate = _check_session_gate()
+    if not _gate.allowed:
+        log.info(
+            "risk_session_gate BLOCK symbol=%s reason=%s",
+            intent.symbol, _gate.reason,
+        )
+        _publish_rejected(intent, [f"session_gate:{_gate.reason}"])
+        return
+
     final_qty = sizing.shares
+
+    # Apply session quality score to position size
+    if _gate.quality_score < 1.0:
+        qty_before_gate = final_qty
+        final_qty = max(1, int(final_qty * _gate.quality_score))
+        log.info(
+            "risk_session_gate symbol=%s window=%s quality=%.2f qty %d->%d",
+            intent.symbol, _gate.reason, _gate.quality_score,
+            qty_before_gate, final_qty,
+        )
+
+    # ── 2b. Enforce MAX_RISK_USD_PER_TRADE cap ───────────────────────
     uncapped_risk = sizing.risk_per_share * final_qty
 
     if uncapped_risk > _MAX_RISK_USD:
@@ -354,6 +396,24 @@ def _on_trade_intent(intent: TradeIntent) -> None:
             intent.symbol, _regime.vol_regime, _VOL_STOP_MULT, _VOL_QTY_MULT,
             qty_before_vol, final_qty, stop_price,
         )
+
+    # ── 2f. Spread-adaptive qty penalty ─────────────────────────────
+    # Penalise wide-spread entries: every bp above threshold costs size.
+    # spread_pct=0.05% → mult=1.0  |  0.20% → 0.55  |  0.40%+ → floor
+    _SPREAD_FREE_PCT  = float(os.environ.get("TL_SPREAD_FREE_PCT",  "0.0005"))  # 0.05%
+    _SPREAD_SLOPE     = float(os.environ.get("TL_SPREAD_SLOPE",     "3.0"))     # steepness
+    _SPREAD_FLOOR     = float(os.environ.get("TL_SPREAD_FLOOR",     "0.25"))    # min mult
+    if _spread_pct > _SPREAD_FREE_PCT:
+        _spread_mult = max(_SPREAD_FLOOR, 1.0 - (_spread_pct - _SPREAD_FREE_PCT) * _SPREAD_SLOPE * 100)
+        qty_before_spread = final_qty
+        final_qty = max(1, int(final_qty * _spread_mult))
+        final_risk_usd = sizing.risk_per_share * final_qty
+        if qty_before_spread != final_qty:
+            log.info(
+                "risk_spread_penalty symbol=%s spread_pct=%.4f mult=%.2f qty %d->%d",
+                intent.symbol, _spread_pct, _spread_mult,
+                qty_before_spread, final_qty,
+            )
 
     # ── 2x. Consolidated risk path log ───────────────────────────────
     _reductions: list[str] = []
@@ -501,6 +561,25 @@ def _on_trade_intent(intent: TradeIntent) -> None:
             _alloc_conf_mult, _alloc_action,
         )
 
+
+# ── Time-of-day cap multiplier schedule ─────────────────────────────
+def _get_tod_cap_mult() -> float:
+    """Return a position-cap multiplier based on time of day (ET).
+    Burst during open/close; throttle during lunch chop."""
+    import os
+    if os.environ.get("TL_TOD_CAP_MULT_ENABLED", "true").lower() != "true":
+        return 1.0
+    from datetime import datetime
+    import zoneinfo
+    t = datetime.now(tz=zoneinfo.ZoneInfo("America/New_York")).time()
+    from datetime import time as dtime
+    if   dtime(9, 30) <= t < dtime(10, 0):  return 1.00  # open burst
+    elif dtime(10, 0) <= t < dtime(11, 30): return 0.85  # early session
+    elif dtime(11,30) <= t < dtime(13,  0): return 0.65  # lunch chop
+    elif dtime(13, 0) <= t < dtime(15,  0): return 0.80  # afternoon
+    elif dtime(15, 0) <= t < dtime(16,  0): return 0.90  # closing push
+    return 0.50  # off-hours (safety floor)
+
     # ── Market Mode risk adjustment ──────────────────────────────────
     _mm_action = "PASS"
     _mm_cap_mult = 1.0
@@ -509,6 +588,9 @@ def _on_trade_intent(intent: TradeIntent) -> None:
         _mm = _mm_get_last()
         if _mm is not None:
             _mm_cap_mult = _mm.position_cap_mult
+            # ── Time-of-day burst multiplier ──────────────────────────
+            _tod_mult = _get_tod_cap_mult()
+            _mm_cap_mult = max(0.25, min(2.0, _mm_cap_mult * _tod_mult))
             if _mm.risk_posture == "MINIMAL":
                 _mm_qty_mult = 0.60
             elif _mm.risk_posture == "DEFENSIVE":
@@ -522,9 +604,9 @@ def _on_trade_intent(intent: TradeIntent) -> None:
                 final_risk_usd = sizing.risk_per_share * final_qty
                 _reductions.append(f"mode({_mm.mode},x{_mm_qty_mult:.2f})")
             log.info(
-                "risk_mode_adjustment symbol=%s mode=%s cap_mult=%.2f "
+                "risk_mode_adjustment symbol=%s mode=%s cap_mult=%.2f tod_mult=%.2f "
                 "qty_mult=%.2f action=%s posture=%s",
-                intent.symbol, _mm.mode, _mm_cap_mult,
+                intent.symbol, _mm.mode, _mm_cap_mult, _tod_mult,
                 _mm_qty_mult, _mm_action, _mm.risk_posture,
             )
 
@@ -694,7 +776,7 @@ def _on_trade_intent(intent: TradeIntent) -> None:
         stop_price=round(stop_price, 2),
         trail_params={
             "side": side,
-            "trail_pct": _DEFAULT_TRAIL_PCT,
+            "trail_pct": _adaptive_trail_pct(_sc_bucket),
             "atr_multiplier": _DEFAULT_ATR_MULT,
             "risk_per_share": round(sizing.risk_per_share, 4),
             "total_risk": round(final_risk_usd, 2),
@@ -1008,6 +1090,11 @@ def _on_open_plan_candidate(cand: OpenPlanCandidate) -> None:
 
     with _lock:
         _drafts += 1
+        import time as _time_mod
+        _draft_store[cand.symbol] = (draft, cand)
+        _draft_store_ts[cand.symbol] = _time_mod.time()
+        log.info("draft_stored symbol=%s entry=%.2f qty=%d total_drafts=%d",
+                 cand.symbol, draft.suggested_entry, draft.qty, len(_draft_store))
 
     # ── Build OrderBlueprint if we are in PREMARKET (or test-forced) ─
     session = get_us_equity_session()
@@ -1022,22 +1109,122 @@ def _on_open_plan_candidate(cand: OpenPlanCandidate) -> None:
 
 # ── OrderBlueprint builder ───────────────────────────────────────────
 
-def _build_entry_ladder(entry_price: float) -> list:
-    """Build 3-5 price levels around entry: +/-step% in even steps."""
-    step = entry_price * (_BLUEPRINT_LADDER_STEP_PCT / 100.0)
+def _build_entry_ladder(entry_price: float, bias_mult: float = 1.0) -> list:
+    """Build 3-5 price levels around entry: +/-step% in even steps.
+
+    bias_mult < 1.0 shifts the entire ladder below mid (tighter open entry).
+    bias_mult > 1.0 shifts above mid (aggressive chase — avoid).
+    Default 1.0 = neutral (centered on entry_price).
+    """
+    biased_entry = round(entry_price * bias_mult, 2)
+    step = biased_entry * (_BLUEPRINT_LADDER_STEP_PCT / 100.0)
     n = _BLUEPRINT_LADDER_LEVELS
     half = n // 2
     levels = []
     for i in range(-half, n - half):
-        levels.append(round(entry_price + i * step, 2))
+        levels.append(round(biased_entry + i * step, 2))
     return levels
 
 
-def _compute_trail_pct(stop_distance_pct: float) -> float:
-    """trail_pct = clamp(stop_distance_pct * factor, min, max)."""
-    raw = stop_distance_pct * _BLUEPRINT_TRAIL_FACTOR
-    return round(max(_BLUEPRINT_TRAIL_MIN_PCT, min(_BLUEPRINT_TRAIL_MAX_PCT, raw)), 3)
+def _compute_trail_pct(stop_distance_pct: float, bucket: str = "none") -> float:
+    """trail_pct = geometry floor blended with scorecard avg_r nudge.
+    Geometry sets the floor (stop_distance * factor).
+    Scorecard avg_r_multiple widens/tightens within blueprint bounds.
+    """
+    geo = stop_distance_pct * _BLUEPRINT_TRAIL_FACTOR
+    geo_clamped = round(max(_BLUEPRINT_TRAIL_MIN_PCT, min(_BLUEPRINT_TRAIL_MAX_PCT, geo)), 3)
+    if not _SC_ENABLED or bucket == "none":
+        return geo_clamped
+    card = _sc_get_card(bucket)
+    if card is None or getattr(card, "sample_n", 0) < 10:
+        return geo_clamped
+    # Blend: 70% geometry, 30% scorecard signal
+    sc_trail = round(_BLUEPRINT_TRAIL_MIN_PCT + (card.avg_r_multiple - 1.0) * 1.7, 3)
+    sc_trail = max(_BLUEPRINT_TRAIL_MIN_PCT, min(_BLUEPRINT_TRAIL_MAX_PCT, sc_trail))
+    blended = round(0.7 * geo_clamped + 0.3 * sc_trail, 3)
+    log.debug(
+        "blueprint_trail bucket=%s avg_r=%.2f geo=%.3f sc=%.3f blended=%.3f",
+        bucket, card.avg_r_multiple, geo_clamped, sc_trail, blended,
+    )
+    return blended
 
+
+
+def fire_open_plans(top_n: int = 10) -> int:
+    """Fire buffered PlanDrafts at market open. Call once at RTH_OPEN (09:30 ET).
+
+    Ranks drafts by composite_score → confidence → total_score.
+    Purges stale drafts (> TL_DRAFT_TTL_S seconds old).
+    Returns count of blueprints published.
+    """
+    import time as _tm
+    global _draft_store, _draft_store_ts
+    now = _tm.time()
+
+    # Purge stale drafts
+    stale = [s for s, ts in _draft_store_ts.items() if (now - ts) > _DRAFT_TTL_S]
+    for s in stale:
+        _draft_store.pop(s, None)
+        _draft_store_ts.pop(s, None)
+    if stale:
+        log.info("draft_purge_stale count=%d symbols=%s", len(stale), stale)
+
+    if not _draft_store:
+        log.info("fire_open_plans: no drafts to fire")
+        return 0
+
+    # Rank by composite_score on the original candidate, then confidence
+    ranked = sorted(
+        _draft_store.values(),
+        key=lambda t: (
+            getattr(t[1], "composite_score", 0.0),
+            t[0].confidence,
+            t[0].total_score,
+        ),
+        reverse=True,
+    )[:top_n]
+
+    import os as _os2, time as _tm2
+    from datetime import datetime as _dt2
+    import zoneinfo as _zi2
+    _et_now = _dt2.now(tz=_zi2.ZoneInfo("America/New_York"))
+    from datetime import time as _dtime2
+    # Within first 90s of open: bias ladder down to avoid paying open spread
+    _open_bias = 1.0
+    # Bid 0.15% below suggested_entry during first 90s to avoid paying open spread
+    _OPEN_ENTRY_DISCOUNT_PCT = float(
+        __import__('os').environ.get("TL_OPEN_ENTRY_DISCOUNT_PCT", "0.0015")
+    )
+    if _dtime2(9, 30) <= _et_now.time() < _dtime2(9, 31, 30):
+        _open_bias = round(1.0 - _OPEN_ENTRY_DISCOUNT_PCT, 6)  # e.g. 0.9985
+
+    fired = 0
+    for draft, cand in ranked:
+        try:
+            if _open_bias != 1.0:
+                import copy as _copy
+                draft = _copy.copy(draft)
+                draft.suggested_entry = round(draft.suggested_entry * _open_bias, 2)
+                draft.suggested_stop  = round(draft.suggested_stop  * _open_bias, 2)
+                draft.risk_usd = round(
+                    abs(draft.suggested_entry - draft.suggested_stop) * draft.qty, 2
+                )
+            _build_and_publish_blueprint(draft, cand)
+            fired += 1
+            log.info(
+                "fire_open_plans_fired symbol=%s entry=%.2f qty=%d "
+                "composite=%.3f conf=%.2f",
+                draft.symbol, draft.suggested_entry, draft.qty,
+                getattr(cand, "composite_score", 0.0), draft.confidence,
+            )
+        except Exception as exc:
+            log.error("fire_open_plans_error symbol=%s err=%s", draft.symbol, exc)
+
+    # Clear store after firing
+    _draft_store.clear()
+    _draft_store_ts.clear()
+    log.info("fire_open_plans_complete fired=%d/%d", fired, len(ranked))
+    return fired
 
 def _build_and_publish_blueprint(draft: PlanDraft, cand: OpenPlanCandidate) -> None:
     """Convert a PlanDraft into an OrderBlueprint and publish.
@@ -1051,7 +1238,7 @@ def _build_and_publish_blueprint(draft: PlanDraft, cand: OpenPlanCandidate) -> N
 
     entry = draft.suggested_entry
     ladder = _build_entry_ladder(entry)
-    trail = _compute_trail_pct(draft.stop_distance_pct)
+    trail = _compute_trail_pct(draft.stop_distance_pct, bucket=getattr(draft, 'bucket', 'none'))
     qty = draft.qty
     risk_usd = draft.risk_usd
 

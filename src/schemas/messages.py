@@ -116,6 +116,10 @@ class WatchCandidate:
     industry_score: float = 0.0
     market_score: float = 0.0
     composite_score: float = 0.0
+    # ── Agent intel fields ──
+    priority: float = 0.0
+    catalyst_tags: List[str] = field(default_factory=list)
+    source: str = ""
 
 
 @dataclass

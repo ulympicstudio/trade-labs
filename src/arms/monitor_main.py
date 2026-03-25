@@ -104,6 +104,7 @@ from src.utils.price_cache import save_prices as _save_prices
 from src.analysis.dashboard_snapshot import DashboardSnapshot
 from src.signals.agent_intel import get_all_active_intel as _get_all_agent_intel
 from src.risk.kill_switch import status_summary as _ks_status_summary
+from src.analysis.agent_intel_loader import AgentIntelLoader
 
 _VOL_MONITOR_ENABLED = os.environ.get("TL_VOL_MONITOR_ENABLED", "true").lower() in ("1", "true", "yes")
 
@@ -174,6 +175,57 @@ def _maybe_alert_consensus(msg: "NewsEvent") -> None:
     )
     sent = _send_imessage(_IMESSAGE_TARGET, body)
     log.info("iMessage consensus alert  symbol=%s  sent=%s", msg.symbol, sent)
+
+# ── Trade lifecycle alerts ───────────────────────────────────────────
+def _trade_alert(body: str, symbol: str = "", cooldown: bool = False) -> None:
+    """Send iMessage trade alert. Optional per-symbol cooldown."""
+    if not _IMESSAGE_ENABLED or not _IMESSAGE_TARGET:
+        return
+    if cooldown and symbol:
+        now = time.time()
+        if (now - _imessage_last_sent.get(f"trade_{symbol}", 0.0)) < 60.0:
+            return
+        _imessage_last_sent[f"trade_{symbol}"] = now
+    _send_imessage(_IMESSAGE_TARGET, body)
+
+
+def _alert_plan_draft(msg) -> None:
+    """Alert on new trade plan (entry approved by risk arm)."""
+    bucket = getattr(msg, "bucket", "") or ""
+    reasons = getattr(msg, "reason_codes", [])
+    reentry = any("reentry" in str(r).lower() for r in reasons)
+    reentry_tag = " ↩REENTRY" if reentry else ""
+    body = (
+        f"📋 PLAN {msg.symbol} ×{msg.qty}{reentry_tag}\n"
+        f"Entry ${msg.suggested_entry:.2f} | Stop ${msg.suggested_stop:.2f}\n"
+        f"Risk ${msg.risk_usd:.0f} | Bucket: {bucket or 'unknown'}\n"
+        f"Conf: {msg.confidence:.2f}"
+    )
+    _trade_alert(body, symbol=msg.symbol, cooldown=True)
+
+
+def _alert_fill(msg) -> None:
+    """Alert on order fill."""
+    body = (
+        f"✅ FILLED {msg.symbol} ×{msg.filled_qty}\n"
+        f"@ ${msg.avg_fill_price:.2f}"
+    )
+    _trade_alert(body, symbol=msg.symbol, cooldown=False)
+
+
+def _alert_exit(symbol: str, qty: int, pnl: float, r_multiple: float,
+                exit_action: str, bucket: str = "", reentry_open: bool = False) -> None:
+    """Alert on position exit."""
+    emoji = "🟢" if pnl >= 0 else "🔴"
+    sign  = "+" if pnl >= 0 else ""
+    reentry_tag = "  ↩ RE-ENTRY WATCH" if reentry_open else ""
+    body = (
+        f"{emoji} EXIT {symbol} ×{qty}\n"
+        f"PnL {sign}${pnl:.2f} | R={r_multiple:.2f}x | {exit_action}\n"
+        f"Bucket: {bucket or 'unknown'}{reentry_tag}"
+    )
+    _trade_alert(body, symbol=symbol, cooldown=False)
+
 
 # ── State ────────────────────────────────────────────────────────────
 _running = True
@@ -283,6 +335,7 @@ class _BoardEntry:
 
 _board: Dict[str, _BoardEntry] = {}   # symbol → _BoardEntry
 _board_lock = threading.Lock()
+_open_plans_fired_today: bool = False   # one-shot: fire pre-market drafts at RTH open
 _last_board_print_ts: float = 0.0
 
 
@@ -423,6 +476,7 @@ def _parse_rvol_from_reasons(reason_codes: list) -> float:
 
 def _on_plan_draft(msg: PlanDraft) -> None:
     """Store the latest PlanDraft for a symbol in the playbook."""
+    _alert_plan_draft(msg)
     ts_str = msg.ts.isoformat() if hasattr(msg.ts, "isoformat") else str(msg.ts)
     with _playbook_lock:
         _playbook[msg.symbol] = _PlaybookEntry(
@@ -488,6 +542,8 @@ def _on_open_plan_candidate(msg: OpenPlanCandidate) -> None:
 
 def _on_order_event(msg: OrderEvent) -> None:
     """Log execution order events (FILLED / REJECTED / CANCELLED / PAPER_FILL etc)."""
+    if msg.event_type == "FILLED" and msg.filled_qty > 0:
+        _alert_fill(msg)
     log.info(
         "order_event symbol=%s type=%s status=%s qty=%d price=%.2f msg=%s",
         msg.symbol,
@@ -1608,6 +1664,9 @@ def main() -> None:
     # Attempt Redis connection (non-blocking retry each cycle)
     bus = _connect_bus()
 
+    # ── Agent intel loader ─────────────────────────────────────
+    intel_loader = AgentIntelLoader(bus, path="data/agent_intel.json")
+
     # ── IB read-only connection (non-blocking) ────────────────
     global _ib_monitor
     _ib_monitor = _try_connect_ib_monitor()
@@ -1616,6 +1675,25 @@ def main() -> None:
     while _running:
         tick += 1
         now = time.time()
+
+        # ── RTH Open: fire pre-market plan drafts (one-shot per day) ──
+        global _open_plans_fired_today
+        if not _open_plans_fired_today:
+            from datetime import datetime
+            import zoneinfo as _zi
+            _et = datetime.now(tz=_zi.ZoneInfo("America/New_York"))
+            from datetime import time as _dtime
+            if _et.time() >= _dtime(9, 30) and _et.time() < _dtime(16, 0):
+                try:
+                    import os as _os
+                    from src.arms.risk_main import fire_open_plans as _fire_plans
+                    _top_n = int(_os.environ.get("TL_OPEN_PLAN_TOP_N", "8"))
+                    _fired = _fire_plans(top_n=_top_n)
+                    log.info("rth_open_trigger fired=%d top_n=%d", _fired, _top_n)
+                except Exception as _exc:
+                    log.error("rth_open_trigger_error err=%s", _exc)
+                finally:
+                    _open_plans_fired_today = True
 
         # Lazy reconnect if bus failed on startup
         if bus is None:
@@ -1631,6 +1709,12 @@ def main() -> None:
 
         _print_status()
         _write_dashboard_snapshot(tick)
+
+        # ── Agent intel poll ──────────────────────────────────────
+        try:
+            intel_loader.poll()
+        except Exception:
+            log.debug("agent_intel_loader poll failed", exc_info=True)
 
         # ── Symbol board (every 60 s) ─────────────────────────────
         global _last_board_print_ts, _last_playbook_print_ts
@@ -1675,6 +1759,16 @@ def main() -> None:
         if now - _last_blueprints_print_ts >= pb_interval:
             _last_blueprints_print_ts = now
             _print_blueprints()
+        # Reset daily open-plans guard after market close
+        if _open_plans_fired_today:
+            from datetime import datetime
+            import zoneinfo as _zi2
+            _et2 = datetime.now(tz=_zi2.ZoneInfo("America/New_York"))
+            from datetime import time as _dtime2
+            if _et2.time() >= _dtime2(16, 15):
+                _open_plans_fired_today = False
+                log.info("open_plans_guard_reset for next session")
+
         _stop_event.wait(settings.heartbeat_interval_s)
         if _stop_event.is_set():
             break

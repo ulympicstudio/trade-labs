@@ -1,7 +1,10 @@
 from ib_insync import IB, Stock, util
 import pandas as pd
 import math
-from config.ib_config import HOST, PORT, CLIENT_ID
+import os as _os
+HOST    = _os.getenv("IB_HOST", "127.0.0.1")
+PORT    = int(_os.getenv("IB_PORT", "7497"))
+CLIENT_ID = int(_os.getenv("TL_INGEST_IB_CLIENT_ID", "3"))
 def get_history_bars(
     ib: IB,
     contract,

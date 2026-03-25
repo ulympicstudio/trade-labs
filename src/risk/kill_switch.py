@@ -44,11 +44,11 @@ _DAILY_LOSS_MAX_PCT = float(os.environ.get(
 # 2. Trades per hour
 _MAX_TRADES_PER_HOUR = int(os.environ.get(
     "TL_KS_MAX_TRADES_HOUR",
-    "50" if _PAPER else "30",
+    "120" if _PAPER else "60",
 ))
 _MAX_TRADES_PER_SYMBOL_HOUR = int(os.environ.get(
     "TL_KS_MAX_PER_SYMBOL_HOUR",
-    "5" if _PAPER else "3",
+    "8" if _PAPER else "5",
 ))
 
 # 3. Max symbol exposure (% of equity in one name)
@@ -82,7 +82,7 @@ _MAX_FAILED_ORDERS_HOUR = int(os.environ.get(
 # 7. Loss streak (consecutive losses)
 _MAX_LOSS_STREAK = int(os.environ.get(
     "TL_KS_MAX_LOSS_STREAK",
-    "5",
+    "7",
 ))
 # Loss streak pause duration
 _LOSS_STREAK_PAUSE_S = int(os.environ.get(
@@ -327,8 +327,10 @@ def check_circuit_breakers(
                 action=BLOCK,
                 reasons=[f"loss_streak_pause: {_loss_streak}>={_MAX_LOSS_STREAK} resume_in={remaining}s"],
             )
-        # Pause expired; allow but note it
-        reasons.append(f"loss_streak={_loss_streak}(pause_expired)")
+        # Pause expired — reset streak and allow
+        _loss_streak = 0
+        _log.info("loss_streak_pause_expired reset streak→0")
+        reasons.append("loss_streak_pause_expired_reset")
 
     # ── 8. ATR spike ───────────────────────────────────────────────
     if _atr_spike_active:
