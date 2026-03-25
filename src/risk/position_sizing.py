@@ -16,6 +16,7 @@ def calculate_position_size(
     stop_price: float = None,
     atr: float = None,
     atr_multiplier: float = 2.0,
+    quality_score: float = 1.0,
 ):
     """
     If stop_price is provided → use it.
@@ -37,6 +38,7 @@ def calculate_position_size(
 
     # Step 4: share calculation
     shares = int(max_risk // risk_per_share)
+    shares = max(1, int(shares * quality_score))
 
     total_risk = shares * risk_per_share
 

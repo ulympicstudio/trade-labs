@@ -1,8 +1,11 @@
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ib_insync import IB, Stock, LimitOrder, Order, StopOrder
+
+log = logging.getLogger("bracket_orders")
 
 
 @dataclass
@@ -63,7 +66,7 @@ def place_limit_tp_trail_bracket(
     try:
         c = _contract(p.symbol)
         ib.qualifyContracts(c)
-        print(f"  [DEBUG] Contract qualified: {c.symbol}, secType={c.secType}, conId={c.conId}")
+        log.debug("Contract qualified: %s, secType=%s, conId=%s", c.symbol, c.secType, c.conId)
 
         include_trail = p.trail_amount > 0
 
@@ -78,7 +81,7 @@ def place_limit_tp_trail_bracket(
         trade_parent = ib.placeOrder(c, parent)
         ib.sleep(0.2)
         parent_id = parent.orderId
-        print(f"  [DEBUG] Parent BUY order: id={parent_id}, qty={p.qty}, LMT={p.entry_limit:.2f}")
+        log.debug("Parent BUY order: id=%s, qty=%s, LMT=%.2f", parent_id, p.qty, p.entry_limit)
 
         # Child A: STOP order for downside protection
         stop_loss_order = StopOrder("SELL", p.qty, round(p.stop_loss, 2))
@@ -93,7 +96,7 @@ def place_limit_tp_trail_bracket(
         trade_stop_loss = ib.placeOrder(c, stop_loss_order)
         ib.sleep(0.2)
         stop_loss_id = stop_loss_order.orderId
-        print(f"  [DEBUG] STOP LOSS order: id={stop_loss_id}, qty={p.qty}, STP=${p.stop_loss:.2f}, parentId={parent_id}")
+        log.debug("STOP LOSS order: id=%s, qty=%s, STP=$%.2f, parentId=%s", stop_loss_id, p.qty, p.stop_loss, parent_id)
 
         trail_id = None
 
@@ -115,14 +118,14 @@ def place_limit_tp_trail_bracket(
             trail.eTradeOnly = False
             trail.firmQuoteOnly = False
 
-            print(f"  [DEBUG] TRAIL Order: auxPrice={trail.auxPrice}, trailStopPrice={trail.trailStopPrice}, parentId={parent_id}")
+            log.debug("TRAIL Order: auxPrice=%s, trailStopPrice=%s, parentId=%s", trail.auxPrice, trail.trailStopPrice, parent_id)
 
             # Capture IB error events during trail placement
             trail_errors = []
             def capture_trail_error(*args):
                 trail_errors.append(args)
                 if len(args) > 2:
-                    print(f"  [ERROR TRAIL] Error {args[1]}: {args[2]}")
+                    log.warning("TRAIL error %s: %s", args[1], args[2])
 
             ib.errorEvent += capture_trail_error
             trade_trail = ib.placeOrder(c, trail)
@@ -130,9 +133,9 @@ def place_limit_tp_trail_bracket(
             ib.errorEvent -= capture_trail_error
 
             trail_id = trail.orderId
-            print(f"  [DEBUG] TRAIL order: id={trail_id}, errors={len(trail_errors)}")
+            log.debug("TRAIL order: id=%s, errors=%s", trail_id, len(trail_errors))
         else:
-            print(f"  [DEBUG] No trail child (trail_amount={p.trail_amount}); 2-leg bracket submitted.")
+            log.debug("No trail child (trail_amount=%s); 2-leg bracket submitted.", p.trail_amount)
 
         # Detect degraded bracket (entry ok but a child leg failed)
         _degraded = False
@@ -149,7 +152,25 @@ def place_limit_tp_trail_bracket(
             _msg = "2-leg bracket submitted (parent + stop); trail deferred."
         if _degraded:
             _msg += f" DEGRADED: missing child legs {_parts}"
-            print(f"  [WARN] Bracket DEGRADED for {p.symbol}: {_parts}")
+            log.warning(
+                "bracket_degraded symbol=%s missing=%s parent_id=%s — cancelling parent",
+                p.symbol, _parts, parent_id,
+            )
+            # Cancel the parent order to prevent an unprotected position
+            try:
+                ib.cancelOrder(trade_parent.order)
+                ib.sleep(0.3)
+                log.warning("bracket_parent_cancelled symbol=%s parent_id=%s", p.symbol, parent_id)
+            except Exception as cancel_err:
+                log.error("bracket_cancel_failed symbol=%s err=%s", p.symbol, cancel_err)
+            return BracketResult(
+                ok=False,
+                message=_msg,
+                parent_id=parent_id,
+                stop_id=stop_loss_id,
+                trail_id=trail_id,
+                degraded=True,
+            )
 
         return BracketResult(
             ok=True,
@@ -157,13 +178,10 @@ def place_limit_tp_trail_bracket(
             parent_id=parent_id,
             stop_id=stop_loss_id,
             trail_id=trail_id,
-            degraded=_degraded,
+            degraded=False,
         )
     except Exception as e:
-        import traceback
-        print(f"  [ERROR] Bracket placement failed:")
-        print(f"    Message: {e}")
-        print(f"    Traceback: {traceback.format_exc()}")
+        log.exception("Bracket placement failed for %s", p.symbol)
         return BracketResult(ok=False, message=f"Bracket failed: {e}")
 
 

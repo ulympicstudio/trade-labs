@@ -206,8 +206,20 @@ def register_fill(
 
 def unregister_position(symbol: str) -> None:
     """Remove a position from exit tracking (after full exit)."""
-    _positions.pop(symbol, None)
+    pos = _positions.pop(symbol, None)
     _decisions.pop(symbol, None)
+    # Re-entry harvester hook — stamp window if exit was profitable
+    try:
+        from src.signals.reentry_harvester import stamp_reentry as _stamp
+        if pos is not None:
+            _stamp(
+                symbol=symbol,
+                exit_r=getattr(pos, "r_multiple", 0.0),
+                exit_reason="trailing_stop",
+                playbook=getattr(pos, "playbook", ""),
+            )
+    except Exception:
+        pass  # harvester is optional — never block exit logic
 
 
 def update_position_state(

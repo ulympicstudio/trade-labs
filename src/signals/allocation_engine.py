@@ -376,6 +376,7 @@ def score_symbol_confluence(
     symbol: str,
     event_score: int = 0,
     sector_state: str = "NEUTRAL",
+    sector_score: float = 0.0,
     rotation_state: str = "NEUTRAL",
     rotation_score: int = 0,
     vol_state: str = "QUIET",
@@ -411,8 +412,13 @@ def score_symbol_confluence(
     # ── Sector contribution ───────────────────────────────────────
     sector_pts = 0.0
     if sector_state in ("BULLISH", "HOT"):
-        sector_pts = 10.0
-        reasons.append(f"sector={sector_state}")
+        # Scale 8–15 pts by sector_score strength (0.5–1.0 → 1.0–1.5x)
+        _sec_mult = 1.0 + max(0.0, min(0.5, sector_score - 0.5))
+        sector_pts = round(10.0 * _sec_mult, 2)
+        reasons.append(f"sector={sector_state}(sc={sector_score:.2f},pts={sector_pts:.1f})")
+    elif sector_state == "BEARISH":
+        sector_pts = -8.0 * (1.0 + max(0.0, min(0.5, sector_score - 0.5)))
+        reasons.append(f"sector_penalty={sector_state}(sc={sector_score:.2f})")
     elif sector_state == "NEUTRAL":
         sector_pts = 3.0
     score += sector_pts

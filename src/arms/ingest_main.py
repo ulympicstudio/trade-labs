@@ -864,7 +864,7 @@ _rsi_warmup_logged: Set[str] = set()             # symbols that have logged warm
 # Tracks how many REAL (non-synthetic) closes each symbol has received.
 # RSI is not trustworthy until real_bar_count >= _RSI_WARMUP_THRESHOLD.
 _real_bar_count: Dict[str, int] = {}
-_RSI_WARMUP_THRESHOLD = _RSI_PERIOD               # 14 real bars to flush synthetic seed
+_RSI_WARMUP_THRESHOLD = int(os.environ.get('TL_RSI_WARMUP_BARS', str(_RSI_PERIOD)))  # env-overridable
 
 
 # ── RVOL computation state ───────────────────────────────────────────

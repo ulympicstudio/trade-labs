@@ -175,10 +175,19 @@ def _load_intel() -> None:
 
     # Parse symbols
     new_intel: Dict[str, SymbolIntel] = {}
+    # symbols coerce: accept list-of-dicts, list-of-strings, or dict
     symbols_raw = raw.get("symbols", {})
-    if not isinstance(symbols_raw, dict):
-        log.warning("Agent intel 'symbols' field is not a dict — ignoring")
-        return
+    if isinstance(symbols_raw, list):
+        coerced: Dict[str, dict] = {}
+        for item in symbols_raw:
+            if isinstance(item, dict) and "symbol" in item:
+                coerced[str(item["symbol"])] = item
+            elif isinstance(item, str):
+                coerced[item] = {}
+        symbols_raw = coerced
+    elif not isinstance(symbols_raw, dict):
+        log.debug("Agent intel 'symbols' field is not a dict — ignoring")
+        symbols_raw = {}
     for sym, data in symbols_raw.items():
         if not isinstance(data, dict):
             continue

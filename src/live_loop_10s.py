@@ -15,7 +15,9 @@ from ib_insync import IB, Stock, util, MarketOrder
 
 from config.identity import SYSTEM_NAME, HUMAN_NAME
 from config.runtime import is_armed, execution_backend, is_paper
-from config.ib_config import IB_HOST, IB_PORT, IB_CLIENT_ID
+from config.ib_config import IB_HOST, IB_PORT
+import os as _os
+IB_CLIENT_ID = int(_os.getenv("TL_LIVELOOP_IB_CLIENT_ID", "10"))
 from config.universe_filter import ALLOWED_SEC_TYPES, ALLOWED_EXCHANGES, STOCK_ALLOWLIST, STOCK_BLOCKLIST, ETF_KEYWORDS
 
 from src.execution.bracket_orders import (

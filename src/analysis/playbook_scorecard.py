@@ -10,6 +10,8 @@ All thresholds are overridable via ``TL_SCORECARD_*`` env vars.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import os
 import time
 from collections import defaultdict, deque
@@ -25,6 +27,13 @@ log = get_logger("scorecard")
 SCORECARD_ENABLED: bool = os.environ.get(
     "TL_SCORECARD_ENABLED", "true"
 ).lower() in ("1", "true", "yes")
+
+# ── Persistence ─────────────────────────────────────────────────────
+_PERSIST_ENABLED: bool = os.environ.get("TL_SC_PERSIST", "true").lower() == "true"
+_PERSIST_PATH: str = os.environ.get(
+    "TL_SC_PERSIST_PATH",
+    os.path.join(os.path.dirname(__file__), "../../data/scorecard_state.json"),
+)
 
 _LOOKBACK_TRADES: int = int(os.environ.get("TL_SCORECARD_LOOKBACK_TRADES", "25"))
 _MIN_TRADES: int = int(os.environ.get("TL_SCORECARD_MIN_TRADES", "5"))
@@ -61,6 +70,8 @@ class TradeRecord:
     r_multiple: float = 0.0     # pnl / risk_usd
     open_ts: float = 0.0
     close_ts: float = 0.0
+    mfe: float = 0.0       # max favorable excursion ($ per share)
+    mae: float = 0.0       # max adverse excursion ($ per share)
 
 
 @dataclass
@@ -77,8 +88,13 @@ class PlaybookScorecard:
     expectancy: float = 0.0     # avg_win × win_rate − avg_loss × loss_rate
     avg_r_multiple: float = 0.0
     last_n_pnl: List[float] = field(default_factory=list)
+    avg_slippage_bps: float = 0.0      # rolling avg fill slippage in bps
+    slippage_sample_n: int = 0         # samples in rolling avg
     current_drawdown: float = 0.0
     confidence_score: float = 1.0   # multiplier: <1 = weak, >1 = strong
+    avg_mfe: float = 0.0       # avg max favorable excursion
+    avg_mae: float = 0.0       # avg max adverse excursion
+    sample_n: int = 0          # alias for trades (for gate checks)
 
 
 @dataclass
@@ -114,6 +130,95 @@ _last_recompute_ts: float = 0.0
 
 
 # ── Trade lifecycle ─────────────────────────────────────────────────
+
+
+def save_scorecard_state() -> None:
+    """Persist _trades deque to disk for warm restart."""
+    if not _PERSIST_ENABLED:
+        return
+    try:
+        p = pathlib.Path(_PERSIST_PATH).expanduser().resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for r in _trades:
+            rows.append({
+                "symbol": r.symbol, "playbook": r.playbook,
+                "sector": r.sector, "industry": r.industry,
+                "regime": r.regime, "market_mode": r.market_mode,
+                "session_state": r.session_state,
+                "entry_price": r.entry_price, "exit_price": r.exit_price,
+                "qty": r.qty, "pnl": r.pnl, "pnl_pct": r.pnl_pct,
+                "risk_usd": r.risk_usd, "r_multiple": r.r_multiple,
+                "mfe": r.mfe, "mae": r.mae,
+                "open_ts": r.open_ts, "close_ts": r.close_ts,
+            })
+        p.write_text(json.dumps(rows, indent=2))
+        log.info("scorecard_saved records=%d path=%s", len(rows), p)
+    except Exception:
+        log.exception("scorecard_save_failed")
+
+
+def load_scorecard_state() -> None:
+    """Load persisted _trades from disk and recompute all scorecards."""
+    if not _PERSIST_ENABLED:
+        return
+    try:
+        p = pathlib.Path(_PERSIST_PATH).expanduser().resolve()
+        if not p.exists():
+            log.info("scorecard_state_not_found path=%s (cold start)", p)
+            return
+        rows = json.loads(p.read_text())
+        loaded = 0
+        for row in rows:
+            rec = TradeRecord(
+                symbol=row.get("symbol", ""),
+                playbook=row.get("playbook", ""),
+                sector=row.get("sector", ""),
+                industry=row.get("industry", ""),
+                regime=row.get("regime", ""),
+                market_mode=row.get("market_mode", ""),
+                session_state=row.get("session_state", ""),
+                entry_price=row.get("entry_price", 0.0),
+                exit_price=row.get("exit_price", 0.0),
+                qty=row.get("qty", 0),
+                pnl=row.get("pnl", 0.0),
+                pnl_pct=row.get("pnl_pct", 0.0),
+                risk_usd=row.get("risk_usd", 0.0),
+                r_multiple=row.get("r_multiple", 0.0),
+                mfe=row.get("mfe", 0.0),
+                mae=row.get("mae", 0.0),
+                open_ts=row.get("open_ts", 0.0),
+                close_ts=row.get("close_ts", 0.0),
+            )
+            _trades.append(rec)
+            loaded += 1
+        _recompute_all()
+        log.info("scorecard_loaded records=%d path=%s", loaded, p)
+    except Exception:
+        log.exception("scorecard_load_failed")
+
+
+def _sc_get_card_internal(bucket):
+    return _playbook_cards.get(bucket)
+
+
+def get_loss_streak(bucket: str) -> int:
+    """Return count of consecutive closing losses for a bucket (0 = no streak)."""
+    card = _sc_get_card_internal(bucket)
+    if card is None or not card.last_n_pnl:
+        return 0
+    streak = 0
+    for pnl in reversed(card.last_n_pnl):
+        if pnl < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def is_loss_streak_blocked(bucket: str, max_streak: int = 3) -> bool:
+    """Return True if bucket has hit max consecutive losses and should be gated."""
+    return get_loss_streak(bucket) >= max_streak
 
 def record_trade_open(
     intent_id: str,
@@ -158,6 +263,9 @@ def record_trade_close(
     exit_price: float,
     pnl: float = 0.0,
     pnl_pct: float = 0.0,
+    mfe: float = 0.0,
+    mae: float = 0.0,
+    slippage_bps: float = 0.0,
 ) -> None:
     """Close out a tracked trade and update scorecard statistics."""
     if not SCORECARD_ENABLED:
@@ -177,8 +285,21 @@ def record_trade_close(
     rec.pnl = round(pnl, 2)
     rec.pnl_pct = round(pnl_pct, 4)
     rec.r_multiple = round(pnl / rec.risk_usd, 2) if rec.risk_usd > 0 else 0.0
+    rec.mfe = round(mfe, 4)
+    rec.mae = round(mae, 4)
+    rec.slippage_bps = round(slippage_bps, 2)
 
     _trades.append(rec)
+
+    # Update per-bucket rolling avg slippage
+    if rec.playbook and rec.playbook != "none" and slippage_bps > 0:
+        _card = _scorecards.get(rec.playbook)
+        if _card is not None:
+            n = _card.slippage_sample_n
+            _card.avg_slippage_bps = round(
+                (_card.avg_slippage_bps * n + slippage_bps) / (n + 1), 2
+            )
+            _card.slippage_sample_n = n + 1
 
     log.info(
         "scorecard_close intent=%s sym=%s playbook=%s pnl=$%.2f pnl_pct=%.2f%% "
@@ -195,6 +316,7 @@ def _simulate_trade_close_for_dev(
     intent_id: str,
     fill_price: float,
     qty: int,
+    slippage_bps: float = 0.0,
 ) -> None:
     """Dev-mode approximation: close trade immediately at fill price.
 
@@ -207,7 +329,7 @@ def _simulate_trade_close_for_dev(
         return
     # Approximate: 0 PnL (entry ≈ fill) — avoids noise in win-rate
     # This still feeds the trade-count dimension so min_trades are reached.
-    record_trade_close(intent_id, exit_price=fill_price, pnl=0.0, pnl_pct=0.0)
+    record_trade_close(intent_id, exit_price=fill_price, pnl=0.0, pnl_pct=0.0, slippage_bps=slippage_bps)
 
 
 # ── Scorecard computation ───────────────────────────────────────────
@@ -244,6 +366,13 @@ def _compute_card(
     # R-multiple
     r_mults = [r.r_multiple for r in recent if r.r_multiple != 0]
     card.avg_r_multiple = round(sum(r_mults) / len(r_mults), 2) if r_mults else 0.0
+
+    # MFE / MAE averages
+    mfe_vals = [r.mfe for r in recent if r.mfe > 0]
+    mae_vals = [r.mae for r in recent if r.mae > 0]
+    card.avg_mfe = round(sum(mfe_vals) / len(mfe_vals), 4) if mfe_vals else 0.0
+    card.avg_mae = round(sum(mae_vals) / len(mae_vals), 4) if mae_vals else 0.0
+    card.sample_n = n
 
     # Last-N PnL trail
     card.last_n_pnl = [r.pnl for r in recent[-10:]]
@@ -461,8 +590,23 @@ def get_risk_sizing_mult(playbook: str) -> float:
     card = get_playbook_scorecard(playbook)
     # Dampen: allocation can boost up to _BOOST_MAX, risk only up to 1.05
     if card.confidence_score > 1.0:
-        return min(1.05, 1.0 + (card.confidence_score - 1.0) * 0.25)
-    return max(_CUT_MAX, card.confidence_score)
+        base_mult = min(1.05, 1.0 + (card.confidence_score - 1.0) * 0.25)
+    else:
+        base_mult = max(_CUT_MAX, card.confidence_score)
+
+    # ── Slippage penalty: reduce size for chronically bad fill quality ──
+    _SLIP_THRESH = float(__import__('os').environ.get("TL_SLIP_PENALTY_THRESH_BPS", "8.0"))
+    _SLIP_MIN_N  = int(__import__('os').environ.get("TL_SLIP_PENALTY_MIN_N", "10"))
+    if card.avg_slippage_bps > _SLIP_THRESH and card.slippage_sample_n >= _SLIP_MIN_N:
+        slip_excess = card.avg_slippage_bps - _SLIP_THRESH
+        slip_penalty = max(0.70, 1.0 - slip_excess * 0.015)
+        log.debug(
+            "slippage_penalty bucket=%s avg_slip=%.1fbps penalty=%.3f",
+            playbook, card.avg_slippage_bps, slip_penalty,
+        )
+        base_mult = round(base_mult * slip_penalty, 4)
+
+    return base_mult
 
 
 def get_priority_bias(playbook: str) -> float:
@@ -497,3 +641,9 @@ def get_scorecard_summary() -> Dict[str, Any]:
         "open_trades": len(_open_trades),
         "total_closed": len(_trades),
     }
+
+# ── Auto-init: load persisted state + register save on exit ─────────
+import atexit as _atexit_sc
+if SCORECARD_ENABLED and _PERSIST_ENABLED:
+    load_scorecard_state()
+    _atexit_sc.register(save_scorecard_state)

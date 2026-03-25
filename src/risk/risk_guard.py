@@ -11,6 +11,8 @@ from config.risk_limits import (
     MAX_TRADES_PER_DAY,
     MAX_RISK_PER_TRADE_PCT,
 )
+from src.risk.session_gate import check_session_gate, GateResult
+from src.signals.regime import get_regime, RegimeState, PANIC
 
 _log = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ def _load_trade_count() -> int:
 class RiskStatus:
     allowed: bool
     reason: str = ""
+    quality_score: float = 1.0
 
 @dataclass
 class RiskState:
@@ -108,6 +111,17 @@ def approve_new_trade(
         open_risk_usd, proposed_trade_risk_usd, max_open, would_pass,
     )
 
+    # Session gate check
+    gate = check_session_gate()
+    if not gate.allowed:
+        return RiskStatus(False, f"Session gate blocked: {gate.reason}", quality_score=0.0)
+
+    # Regime check — block new entries in RED regime
+    # (spy_closes will be empty here so regime falls back to YELLOW safely)
+    regime = get_regime()
+    if regime.regime == PANIC:
+        return RiskStatus(False, f"Regime PANIC — no new entries: {regime.reasons}", quality_score=0.0)
+
     if state.trading_halted:
         return RiskStatus(False, f"Trading halted: {state.halted_reason}")
 
@@ -128,7 +142,7 @@ def approve_new_trade(
             f"Per-trade risk cap exceeded: {usd(proposed_trade_risk_usd)} > {max_trade}",
         )
 
-    return RiskStatus(True, "Approved")
+    return RiskStatus(True, "Approved", quality_score=gate.quality_score)
 
 
 def record_trade_taken() -> None:

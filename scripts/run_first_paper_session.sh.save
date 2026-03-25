@@ -60,13 +60,10 @@ unset TL_TEST_FORCE_SECTOR_SCORE 2>/dev/null || true
 export TL_ACCOUNT_EQUITY=100000
 export MAX_RISK_USD_PER_TRADE=50
 export TL_RISK_PER_TRADE_PCT=0.005
-
-export TL_SIG_MIN_EVENT_SCORE_CONSENSUS=38
-export TL_SIG_MIN_EVENT_SCORE_DEV=20
-export TL_SIG_SPREAD_MAX_PCT=0.005    # relax spread gate for SIM quotes
-export TL_RSI_WARMUP_BARS=5             # allow RSI with fewer bars (paper mode)
-export TL_HEARTBEAT_TIMEOUT_S=180       # watchdog relaxed for after-hours
-
+export TL_KS_DAILY_LOSS_PCT
+export TL_SIGNAL_MAX_SPREAD_PCT=0.005
+export TL_RSI_WARMUP_BARS=5
+export TL_HEARTBEAT_TIMEOUT_S=18
 # Heat cap: enabled, max 3 concurrent positions for first session
 export TL_HEAT_CAP_ENABLED=true
 export TL_HEAT_MAX_OPEN_POS=3

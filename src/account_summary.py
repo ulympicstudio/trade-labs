@@ -8,7 +8,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from ib_insync import IB
-from config.ib_config import IB_HOST, IB_PORT, IB_CLIENT_ID
+from config.ib_config import IB_HOST, IB_PORT
+import os as _os
+IB_CLIENT_ID = int(_os.getenv('TL_UTIL_IB_CLIENT_ID', '20'))
 
 ib = IB()
 ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
