@@ -186,9 +186,9 @@ _DEV_STRATEGY = os.environ.get(
 _MAX_INTENTS_PER_SYMBOL_PER_HOUR = 3
 
 # ── EventScore gating thresholds ─────────────────────────────────────
-_ES_MIN_RSI = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_RSI", "35"))
-_ES_MIN_DEV = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_DEV", "25"))
-_ES_MIN_CONSENSUS = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_CONSENSUS", "45"))
+_ES_MIN_RSI = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_RSI", "22"))
+_ES_MIN_DEV = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_DEV", "18"))
+_ES_MIN_CONSENSUS = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_CONSENSUS", "30"))
 _ES_MIN_VOL = int(os.environ.get("TL_SIG_MIN_EVENT_SCORE_VOL", "30"))
 _ES_SOFT_MARGIN = 10  # within this margin of threshold → soft penalty
 
@@ -551,10 +551,17 @@ class _OffHoursScore:
             + self.liq_points * _W_LIQ
             + self.vol_points * _W_VOL
             + self.momentum_pts * _W_MOM
-            + self.spread_points * _W_SPREAD
             + self.rsi_points * _W_RSI
             + self.agent_boost
+            + self._spread_penalty()
         )
+
+    def _spread_penalty(self) -> float:
+        if self.spread_pct < 0.0015:
+            return 0.0
+        if self.spread_pct < 0.0025:
+            return -2.0
+        return -4.0
 
 
 _OFF_HOURS_MAX_SCORE = _OFF_HOURS_MAX_WEIGHTED  # 25.0
@@ -613,11 +620,18 @@ class _PremarketScore:
             self.gap_points * _PREMARKET_GAP_WEIGHT
             + self.vol_points * _PREMARKET_VOL_WEIGHT
             + self.news_points * _PREMARKET_NEWS_WEIGHT
-            + self.spread_points * _PREMARKET_SPREAD_WEIGHT
             + self.rsi_points * _PREMARKET_RSI_WEIGHT
             + self.rvol_points  # rvol_points already weighted (0-3)
             + self.agent_boost
+            + self._spread_penalty()
         )
+
+    def _spread_penalty(self) -> float:
+        if self.spread_pct < 0.0015:
+            return 0.0
+        if self.spread_pct < 0.0025:
+            return -2.0
+        return -4.0
 
 
 _premarket_board: Dict[str, _PremarketScore] = {}

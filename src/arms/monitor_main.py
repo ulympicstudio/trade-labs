@@ -1706,6 +1706,8 @@ def main() -> None:
         # Record own heartbeat
         with _lock:
             _last_seen["monitor"] = time.time()
+        if bus is not None:
+            bus.publish(HEARTBEAT, Heartbeat(arm="monitor"))
 
         _print_status()
         _write_dashboard_snapshot(tick)

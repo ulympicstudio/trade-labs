@@ -26,6 +26,7 @@ os.environ.setdefault("BUS_BACKEND", "local")
 from src.bus.local_bus import LocalBus
 from src.bus.bus_factory import set_shared_bus
 from src.monitoring.logger import get_logger
+from src.utils.session_logger import SessionLogger
 
 log = get_logger("dev_runner")
 
@@ -458,6 +459,7 @@ def main() -> None:
 
     # ── Shutdown summary ─────────────────────────────────────────
     _log_shutdown_summary(threads)
+    SessionLogger(start_ts=_start_ts).write()
 
     # Give arms time to wind down (ingest may need up to 10+ s)
     log.info("Waiting for arm threads to exit…")

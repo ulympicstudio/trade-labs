@@ -28,11 +28,15 @@ export TRADE_LABS_MODE=PAPER
 export TRADE_LABS_EXECUTION_BACKEND=SIM
 export TRADE_LABS_ARMED=0
 
-# Execution: disabled (SIM fills via sim-friction only, no live orders)
-export EXECUTION_ENABLED=false
+# Execution: enabled (SIM fills via sim-friction, no live orders)
+export EXECUTION_ENABLED=true
 export TL_EXEC_SIM_FRICTION=true
 export TL_EXEC_SIM_DELAY_MS=250
 export TL_EXEC_SIM_SLIPPAGE_BPS=3
+
+# Market data: pull real quotes from IB paper account feed
+# TL_LIVE_TRADING=0 and EXECUTION_BACKEND=SIM are unaffected — no real orders
+export TL_INGEST_USE_IB=1
 
 # ══════════════════════════════════════════════════════════════════════
 # SECTION 2: Force-path test flags — ALL OFF
