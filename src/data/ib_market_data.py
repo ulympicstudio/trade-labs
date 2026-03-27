@@ -30,6 +30,23 @@ def connect_ib() -> IB:
     ib.connect(HOST, PORT, clientId=CLIENT_ID, timeout=10)
     return ib
 
+# Symbols that need an explicit primaryExch for IBKR contract resolution.
+# SMART routing alone is ambiguous for these tickers.
+EXCHANGE_OVERRIDES: dict[str, str] = {
+    "SQ":    "NYSE",
+    "BRK.B": "NYSE",
+    "BF.B":  "NYSE",
+}
+
+
+def make_contract(symbol: str) -> Stock:
+    """Return a Stock contract with primaryExch applied if known."""
+    c = Stock(symbol, "SMART", "USD")
+    if symbol in EXCHANGE_OVERRIDES:
+        c.primaryExch = EXCHANGE_OVERRIDES[symbol]
+    return c
+
+
 def get_spy_contract():
     # Always use SMART routing
     return Stock("SPY", "SMART", "USD")

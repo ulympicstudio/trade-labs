@@ -12,6 +12,7 @@ from typing import Set, List, Dict, Tuple, Optional
 
 import requests
 from ib_insync import IB, Stock, util, MarketOrder
+from src.data.ib_market_data import make_contract as _make_ib_contract
 
 from config.identity import SYSTEM_NAME, HUMAN_NAME
 from config.runtime import is_armed, execution_backend, is_paper
@@ -595,7 +596,7 @@ def is_valid_stock_contract(
 
 
 def _contract(symbol: str) -> Stock:
-    return Stock(symbol, "SMART", "USD")
+    return _make_ib_contract(symbol)
 
 
 def get_recent_price_1m(ib: IB, symbol: str) -> float:
@@ -1170,7 +1171,7 @@ def main():
                         catalyst_contracts.append(c)
                         continue
                     try:
-                        c = Stock(opp.symbol, "SMART", "USD")
+                        c = _make_ib_contract(opp.symbol)
                         # Try to qualify - this validates the symbol exists with IB
                         qualified = ib.qualifyContracts(c)
                         

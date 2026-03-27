@@ -668,9 +668,9 @@ def _fetch_historical_bars(symbol: str, bar_size: str = "1 min", lookback: int =
     """
     try:
         from src.broker.ib_session import get_ib
-        from ib_insync import Stock
+        from src.data.ib_market_data import make_contract
         ib   = get_ib()
-        contract = Stock(symbol, "SMART", "USD")
+        contract = make_contract(symbol)
         # duration: 1 day covers 390 min bars (full RTH session)
         duration = f"{lookback + 5} S" if "sec" in bar_size else "2 D"
         bars = ib.reqHistoricalData(

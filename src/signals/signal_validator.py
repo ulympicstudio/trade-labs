@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple, List
 
 import pandas as pd
 from ib_insync import IB, Stock, util
+from src.data.ib_market_data import make_contract as _make_ib_contract
 
 from src.quant.hyper_swing_filters import (
     calc_vwap,
@@ -59,7 +60,7 @@ def _put_cache(key: str, val):
 # ── IB data helpers ──────────────────────────────────────────────────────────
 
 def _contract(symbol: str) -> Stock:
-    return Stock(symbol, "SMART", "USD")
+    return _make_ib_contract(symbol)
 
 
 def fetch_intraday_5m(ib: IB, symbol: str) -> Optional[pd.DataFrame]:

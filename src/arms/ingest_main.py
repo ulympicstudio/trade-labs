@@ -1013,10 +1013,9 @@ def _fetch_ib_snapshot(ib, symbol: str) -> Optional[MarketSnapshot]:
     if _stopping:
         return None
     try:
-        from ib_insync import Stock
-        from src.data.ib_market_data import get_last_price
+        from src.data.ib_market_data import get_last_price, make_contract
 
-        contract = Stock(symbol, "SMART", "USD")
+        contract = make_contract(symbol)
         ib.qualifyContracts(contract)
         price = get_last_price(ib, contract)
         return MarketSnapshot(
