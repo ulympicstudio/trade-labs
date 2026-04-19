@@ -4,12 +4,54 @@ Scours the web (news, earnings, options, social, insiders) for swing trading cat
 """
 
 import logging
+import os
 import requests
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
 from collections import defaultdict
 import feedparser
+
+# ── Symbol whitelist: loaded once at module startup ──────────────────
+_VALID_SYMBOLS: set = set()
+try:
+    import pandas as pd
+    _UNIVERSE_PATH = os.path.join(
+        os.path.dirname(__file__), "..", "universe", "universe_master.csv"
+    )
+    if os.path.exists(_UNIVERSE_PATH):
+        _VALID_SYMBOLS = set(
+            pd.read_csv(_UNIVERSE_PATH)["symbol"].str.upper()
+        )
+except Exception:
+    pass  # graceful fallback — filtering still works via deny lists
+
+_CRYPTO_BLACKLIST = {
+    "BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "MATIC",
+    "AVAX", "DOT", "SHIB", "LINK", "UNI", "LTC",
+}
+_COMMON_WORDS = {
+    "FOR", "THE", "AND", "BUT", "NOT", "ARE", "ALL", "NEW",
+    "GET", "NOW", "OUT", "TOP", "BIG", "ONE", "CAN", "MAY",
+    "USE", "SET", "RUN", "HIT", "CUT", "PUT", "END", "KEY",
+    "LOW", "HIGH", "OLD", "UP", "AI", "IT", "US", "OK",
+    "CEO", "IPO", "GDP", "SEC", "FDA", "IMO", "EPS", "PE",
+    "DD", "TL", "DR", "OP", "FYI", "PSA", "IMO", "ETA",
+}
+
+
+def _is_valid_symbol(sym: str) -> bool:
+    """Return True only for symbols likely to be real equities."""
+    if not sym or len(sym) < 2:
+        return False
+    if sym in _CRYPTO_BLACKLIST:
+        return False
+    if sym in _COMMON_WORDS:
+        return False
+    # If universe is loaded, require membership
+    if _VALID_SYMBOLS:
+        return sym in _VALID_SYMBOLS
+    return True  # permissive fallback when CSV is missing
 from urllib.parse import quote
 import json
 
@@ -473,12 +515,12 @@ class CatalystHunter:
         # Prioritize: $SYMBOL patterns (most reliable)
         dollar_symbols = re.findall(r'\$([A-Z]{2,5})\b', text)
         if dollar_symbols:
-            return [s for s in dollar_symbols if s not in invalid]
+            return [s for s in dollar_symbols if s not in invalid and _is_valid_symbol(s)]
         
         # Fallback: SYMBOL in parentheses like (NVDA)
         paren_symbols = re.findall(r'\(([A-Z]{2,5})\)', text)
         if paren_symbols:
-            return [s for s in paren_symbols if s not in invalid]
+            return [s for s in paren_symbols if s not in invalid and _is_valid_symbol(s)]
         
         # Last resort: ANY uppercase 2-5 letter word (less reliable)
         # But filter to known likely stock patterns with strong keywords
@@ -506,7 +548,8 @@ class CatalystHunter:
                     # Only extract if we have strong trading context
                     candidates.append(s)
         
-        return list(set(candidates))  # Deduplicate
+        # Final whitelist filter: only return symbols in the known universe
+        return list(set(s for s in candidates if _is_valid_symbol(s)))
     
     def _classify_news(self, headline: str) -> str:
         """Classify news headline into catalyst type."""

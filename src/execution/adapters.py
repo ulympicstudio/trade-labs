@@ -33,7 +33,9 @@ def plan_to_order_request(plan: OrderPlan) -> LegacyOrderRequest:
     * ``order_type`` — mapped from ``plan.entry_type``.
     * ``stop_loss`` — passed through from ``plan.stop_price``.
     """
-    side = plan.trail_params.get("side", "BUY")
+    side = getattr(plan, "direction", None) or plan.trail_params.get("side", "BUY")
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"Invalid side '{side}' in OrderPlan for {plan.symbol}")
 
     # Map entry_type to legacy order_type tokens
     order_type_map = {

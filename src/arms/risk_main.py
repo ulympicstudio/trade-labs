@@ -37,6 +37,13 @@ from src.schemas.messages import (
     OpenPlanCandidate, PlanDraft, OrderBlueprint,
 )
 from src.market.session import get_us_equity_session, PREMARKET, is_test_session_forced, get_test_force_session
+import config.runtime as _rtcfg
+from src.policies.session_policy import (
+    SessionContext,
+    QuoteContext,
+    VenuePolicy,
+    can_emit_entry,
+)
 from src.risk.session_gate import check_session_gate as _check_session_gate
 from src.risk.kill_switch import (
     check_circuit_breakers as _check_breakers,
@@ -123,8 +130,21 @@ from src.risk.open_risk_tracker import (
     get_total_open_risk as _ort_total_risk,
     get_position_count as _ort_pos_count,
 )
+from src.risk.open_risk_tracker import record_fill_notional as _ort_record_fill_notional
+from src.risk.cash_account import (
+    check_cash_order as _cash_check_order,
+    cash_account_state as _cash_state,
+)
+from src.monitoring.throughput_dashboard import throughput as _throughput
+from src.monitoring.funnel_ledger import (
+    funnel_ledger,
+    FunnelEvent,
+    make_candidate_id,
+)
+from src.monitoring.reject_event_monitor import reject_monitor, RejectStage, RejectType
 
 log = get_logger("risk")
+_runtime_cfg = _rtcfg.get_resolved_config()
 
 # ── Volatility-aware risk multipliers ────────────────────────────────
 _VOL_LEADER_STOP_MULT = float(os.environ.get("TL_RISK_VOL_STOP_MULT", "1.3"))
@@ -238,6 +258,49 @@ def _handle_signal(signum, _frame):
     _stop_event.set()
 
 
+# ── Advanced order blueprint builder ─────────────────────────────────
+
+def build_advanced_order_blueprint(plan: OrderPlan) -> dict:
+    """Build a structured broker-ready blueprint from an approved OrderPlan.
+
+    The blueprint is deterministically emitted on every approval so that
+    downstream execution always has a blueprint to work from.
+    """
+    _entry_px = plan.limit_prices[0] if plan.limit_prices else plan.stop_price
+    _trail_pct = plan.trail_params.get("trail_pct", _DEFAULT_TRAIL_PCT)
+    _side = plan.trail_params.get("side", "BUY")
+    _tp_price = plan.trail_params.get("take_profit_price")
+    _session = get_us_equity_session()
+
+    return {
+        "symbol": plan.symbol,
+        "side": _side,
+        "entry": {
+            "type": plan.entry_type or "LMT",
+            "limit_price": round(_entry_px, 2),
+            "tif": plan.tif or "DAY",
+            "outsideRth": _session != "RTH",
+        },
+        "stop_loss": {
+            "type": "STP",
+            "stop_price": round(plan.stop_price, 2),
+        },
+        "trailing_stop": {
+            "type": "TRAIL",
+            "trail_percent": round(_trail_pct, 2),
+            "activate_above": round(_entry_px * 1.005, 2),
+        },
+        "take_profit": (
+            {
+                "type": "LMT",
+                "limit_price": round(_tp_price, 2),
+            } if _tp_price else None
+        ),
+        "qty": int(plan.qty),
+        "risk_dollars": round(plan.trail_params.get("total_risk", 0.0), 2),
+    }
+
+
 # ── Intent handler ───────────────────────────────────────────────────
 
 def _on_trade_intent(intent: TradeIntent) -> None:
@@ -247,6 +310,13 @@ def _on_trade_intent(intent: TradeIntent) -> None:
     with _lock:
         _intents_received += 1
 
+    # ── Fate tracking: record arrival ────────────────────────────
+    from src.monitoring.intent_fate import fate_tracker
+    fate_tracker.record_emission(
+        intent.intent_id, intent.symbol,
+        strategy=getattr(intent, "setup_type", ""),
+    )
+
     log.info(
         "Received TradeIntent  id=%s  symbol=%s  dir=%s  conf=%.2f",
         intent.intent_id,
@@ -254,6 +324,96 @@ def _on_trade_intent(intent: TradeIntent) -> None:
         intent.direction,
         intent.confidence,
     )
+
+    _candidate_id = getattr(intent, "candidate_id", "") or make_candidate_id(
+        intent.symbol,
+        intent.setup_type or "risk",
+        intent.ts.timestamp() if hasattr(intent.ts, "timestamp") else time.time(),
+    )
+    funnel_ledger.record_candidate_created(
+        candidate_id=_candidate_id,
+        symbol=intent.symbol,
+        strategy_id=intent.setup_type or "risk",
+        session_label=(intent.session or get_us_equity_session()),
+        event_ts=time.time(),
+        notes=f"intent_id={intent.intent_id}",
+    )
+
+    _intent_session = (intent.session or get_us_equity_session())
+    _quote_age_s: Optional[float] = None
+    if hasattr(intent, "ts") and hasattr(intent.ts, "timestamp"):
+        _quote_age_s = max(0.0, time.time() - intent.ts.timestamp())
+
+    _quote_present = intent.entry_zone_low > 0 and intent.entry_zone_high > 0
+    _quote_synthetic = bool(getattr(intent, "spread_bps", 0.0) <= 0.0)
+
+    _venue_policy = VenuePolicy(
+        allow_entries_rth=True,
+        allow_entries_pre=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        allow_entries_afterhours=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        manage_enabled_when_entry_blocked=True,
+        require_live_quotes=bool(_runtime_cfg.require_live_quotes),
+        synthetic_ok=bool(_runtime_cfg.synthetic_ok),
+        quote_stale_after_s=float(os.environ.get("TL_POLICY_MAX_QUOTE_AGE_S", "5.0")),
+    )
+
+    _session_decision = can_emit_entry(
+        SessionContext(session=_intent_session),
+        QuoteContext(
+            quote_present=_quote_present,
+            quote_age_s=_quote_age_s,
+            is_synthetic=_quote_synthetic,
+        ),
+        _venue_policy,
+    )
+    if not _session_decision.entry_enabled:
+        funnel_ledger.record(
+            event_type=FunnelEvent.RISK_BLOCKED,
+            candidate_id=_candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "risk",
+            session_label=_session_decision.session_label,
+            block_reason=_session_decision.block_reason,
+            emitted_intent_id=intent.intent_id,
+            event_ts=time.time(),
+        )
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=intent.intent_id,
+            order_id="",
+            symbol=intent.symbol,
+            stage=RejectStage.RISK,
+            reject_type=RejectType.POLICY,
+            reject_reason_code=str(_session_decision.block_reason or "RISK_SESSION_BLOCKED").upper(),
+            reject_message=f"session={_session_decision.session_label},mode={_session_decision.mode}",
+            session_label=_session_decision.session_label,
+            strategy_id=intent.setup_type or "risk",
+            ts_event=time.time(),
+            raw_context={
+                "require_live_quotes": _session_decision.require_live_quotes,
+                "synthetic_ok": _session_decision.synthetic_ok,
+            },
+        )
+        log.info(
+            "risk_session_policy block symbol=%s session_label=%s mode=%s block_reason=%s "
+            "require_live_quotes=%s synthetic_ok=%s paper_ah_test=%s manage_enabled=%s",
+            intent.symbol,
+            _session_decision.session_label,
+            _session_decision.mode,
+            _session_decision.block_reason,
+            _session_decision.require_live_quotes,
+            _session_decision.synthetic_ok,
+            _runtime_cfg.paper_ah_test,
+            _session_decision.manage_enabled,
+        )
+        _publish_rejected(intent, [f"session_policy:{_session_decision.block_reason or 'BLOCKED'}"])
+        return
 
     # ── 1. Compute entry & stop prices from the intent ───────────────
     entry_price = (intent.entry_zone_low + intent.entry_zone_high) / 2.0
@@ -363,14 +523,35 @@ def _on_trade_intent(intent: TradeIntent) -> None:
     # Feed ATR spike state to kill_switch (J)
     _ks_update_atr_spike(_regime.atr_pct, _regime.atr_baseline_pct)
 
+    # ── Regime throttle: max_pos check (replaces hard PANIC block) ──
+    _intent_max_pos = getattr(intent, "regime_max_pos", 5)
+    _current_pos = _ort_pos_count()
+    if _intent_max_pos <= 0:
+        log.warning(
+            "risk_regime BLOCK  symbol=%s  regime=%s  max_pos=0",
+            intent.symbol, _regime.regime,
+        )
+        _publish_rejected(intent, ["regime_throttle_halt"])
+        return
+    if _current_pos >= _intent_max_pos:
+        log.info(
+            "risk_regime_pos_cap symbol=%s regime=%s positions=%d max_pos=%d",
+            intent.symbol, _regime.regime, _current_pos, _intent_max_pos,
+        )
+        _publish_rejected(intent, ["regime_pos_cap"])
+        return
+
+    # Legacy PANIC long block (only if throttle still allows)
     if _regime.regime == _REGIME_PANIC and _BLOCK_LONGS_IN_PANIC:
-        if intent.direction == "LONG":
+        _intent_mode_check = getattr(intent, "mode", "FULL")
+        if intent.direction == "LONG" and _intent_mode_check == "FULL":
             log.warning(
-                "risk_regime BLOCK  symbol=%s  regime=PANIC  direction=LONG",
+                "risk_regime BLOCK  symbol=%s  regime=PANIC  direction=LONG  mode=FULL",
                 intent.symbol,
             )
             _publish_rejected(intent, ["regime_panic_long_block"])
             return
+        # MIN_PROBE / REDUCED allowed even in PANIC
 
     qty_before_regime = final_qty
     if _regime_mult != 1.0:
@@ -382,6 +563,44 @@ def _on_trade_intent(intent: TradeIntent) -> None:
             "risk_regime symbol=%s regime=%s mult=%.2f qty_before=%d qty_after=%d",
             intent.symbol, _regime.regime, _regime_mult,
             qty_before_regime, final_qty,
+        )
+
+    # ── 2d-ii. Hybrid sizing: mode-aware cap_mult + probe/reduced ──
+    _intent_mode = getattr(intent, "mode", "FULL")
+    _intent_cap_mult = getattr(intent, "regime_cap_mult", 1.0)
+    if _intent_cap_mult < 1.0:
+        qty_before_cap = final_qty
+        final_qty = max(1, int(final_qty * _intent_cap_mult))
+        final_risk_usd = sizing.risk_per_share * final_qty
+        _reductions.append(f"regime_cap(x{_intent_cap_mult:.2f})")
+        log.info(
+            "risk_regime_cap symbol=%s cap_mult=%.2f qty %d->%d mode=%s",
+            intent.symbol, _intent_cap_mult, qty_before_cap, final_qty, _intent_mode,
+        )
+    # Per-regime×session probe/reduced sizing from budget table
+    from src.risk.regime_throttle import get_intent_budget as _get_budget
+    _sz_regime = getattr(intent, "regime", _regime.regime)
+    _sz_session = getattr(intent, "session", "REGULAR")
+    _sz_budget = _get_budget(_sz_regime, _sz_session)
+    if _intent_mode == "MIN_PROBE":
+        _probe_pct = _sz_budget.probe_risk_pct
+        qty_before_probe = final_qty
+        final_qty = max(1, int(final_qty * _probe_pct))
+        final_risk_usd = sizing.risk_per_share * final_qty
+        _reductions.append(f"probe(x{_probe_pct:.3f})")
+        log.info(
+            "risk_probe_sizing symbol=%s probe_pct=%.3f qty %d->%d regime=%s session=%s",
+            intent.symbol, _probe_pct, qty_before_probe, final_qty, _sz_regime, _sz_session,
+        )
+    elif _intent_mode == "REDUCED":
+        _reduced_pct = _sz_budget.reduced_risk_pct
+        qty_before_reduced = final_qty
+        final_qty = max(1, int(final_qty * _reduced_pct))
+        final_risk_usd = sizing.risk_per_share * final_qty
+        _reductions.append(f"reduced(x{_reduced_pct:.2f})")
+        log.info(
+            "risk_reduced_sizing symbol=%s reduced_pct=%.2f qty %d->%d regime=%s session=%s",
+            intent.symbol, _reduced_pct, qty_before_reduced, final_qty, _sz_regime, _sz_session,
         )
 
     # ── 2e. Volatility regime stop widening & qty reduction (G) ────
@@ -403,6 +622,7 @@ def _on_trade_intent(intent: TradeIntent) -> None:
     _SPREAD_FREE_PCT  = float(os.environ.get("TL_SPREAD_FREE_PCT",  "0.0005"))  # 0.05%
     _SPREAD_SLOPE     = float(os.environ.get("TL_SPREAD_SLOPE",     "3.0"))     # steepness
     _SPREAD_FLOOR     = float(os.environ.get("TL_SPREAD_FLOOR",     "0.25"))    # min mult
+    _spread_pct = abs(intent.entry_zone_high - intent.entry_zone_low) / max(entry_price, 0.01)
     if _spread_pct > _SPREAD_FREE_PCT:
         _spread_mult = max(_SPREAD_FLOOR, 1.0 - (_spread_pct - _SPREAD_FREE_PCT) * _SPREAD_SLOPE * 100)
         qty_before_spread = final_qty
@@ -729,6 +949,38 @@ def _get_tod_cap_mult() -> float:
         final_risk_usd = sizing.risk_per_share * final_qty
 
     # ── 3. Risk approval (existing module) ───────────────────────────
+        # ── 2b. Cash-account exposure guard ─────────────────────────────
+        # Must run before risk_guard so settled-cash exhaustion is caught
+        # even when stop-based risk_usd looks acceptable.
+        _cash_result = _cash_check_order(
+            symbol=intent.symbol,
+            direction=intent.direction or "LONG",
+            qty=final_qty,
+            limit_price=entry_price,
+        )
+        log.info(_cash_result.log_line())
+        if not _cash_result.approved:
+            funnel_ledger.record(
+                event_type=FunnelEvent.RISK_BLOCKED,
+                candidate_id=_candidate_id,
+                symbol=intent.symbol,
+                strategy_id=intent.setup_type or "risk",
+                session_label=(intent.session or get_us_equity_session()),
+                block_reason=_cash_result.reject_reason,
+                emitted_intent_id=intent.intent_id,
+                notes=_cash_result.log_line(),
+                event_ts=time.time(),
+            )
+            reject_monitor.record_reject(
+                stage=RejectStage.RISK,
+                symbol=intent.symbol,
+                reason=RejectType.OTHER,
+                notes=_cash_result.reject_reason,
+            )
+            _publish_rejected(intent, ["cash_account_guard", _cash_result.reject_reason])
+            return
+
+        # ── 3. Risk approval (existing module) ───────────────────────────
     try:
         from src.risk.risk_guard import (
             get_risk_state,
@@ -756,6 +1008,17 @@ def _get_tod_cap_mult() -> float:
         return
 
     if not status.allowed:
+        funnel_ledger.record(
+            event_type=FunnelEvent.RISK_BLOCKED,
+            candidate_id=_candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "risk",
+            session_label=(intent.session or get_us_equity_session()),
+            block_reason="RISK_GUARD_BLOCK",
+            emitted_intent_id=intent.intent_id,
+            notes=status.reason,
+            event_ts=time.time(),
+        )
         log.info(
             "Trade REJECTED  symbol=%s  reason=%s",
             intent.symbol,
@@ -770,6 +1033,7 @@ def _get_tod_cap_mult() -> float:
     plan = OrderPlan(
         symbol=intent.symbol,
         intent_id=intent.intent_id,
+        candidate_id=(getattr(intent, "candidate_id", "") or _candidate_id),
         qty=final_qty,
         entry_type="LMT",
         limit_prices=[round(entry_price, 2)],
@@ -791,7 +1055,12 @@ def _get_tod_cap_mult() -> float:
         },
         tif="DAY",
         timeout_s=60.0,
+        mode=getattr(intent, "mode", "FULL"),
     )
+
+    # ── Risk telemetry: record approval ──────────────────────────────
+    _risk_telemetry.record_approve()
+    _throughput.record_risk_approve(intent.symbol)
 
     log.info(
         "Trade APPROVED  symbol=%s  qty=%d  entry=%.2f  stop=%.2f"
@@ -809,6 +1078,19 @@ def _get_tod_cap_mult() -> float:
     else:
         log.warning("Bus unavailable — approved plan for %s not published", plan.symbol)
 
+    # ── Deterministic blueprint emission on approval ─────────────────
+    _bp = build_advanced_order_blueprint(plan)
+    log.info(
+        "risk orderplanapproved sym=%s qty=%s entry=%.2f stop=%.2f trail=%.2f tp=%s",
+        plan.symbol, plan.qty,
+        _bp["entry"]["limit_price"],
+        _bp["stop_loss"]["stop_price"],
+        _bp.get("trailing_stop", {}).get("trail_percent", 0.0),
+        _bp.get("take_profit", {}).get("limit_price") if _bp.get("take_profit") else None,
+    )
+    if _bus is not None:
+        _bus.publish(ORDER_BLUEPRINT, _bp)
+
     # Record sector fill (notional exposure) for concentration tracking
     _record_sector_fill(intent.symbol, notional=entry_price * final_qty)
 
@@ -824,6 +1106,11 @@ def _get_tod_cap_mult() -> float:
 
     # Record fill in open-risk tracker so the 2% cap sees real exposure
     _ort_record_fill(intent.symbol, final_risk_usd)
+
+    # Record notional exposure for cash-account settled-cash tracking
+    _ort_record_fill_notional(intent.symbol, final_qty, entry_price)
+    if _cash_state.cash_mode:
+        _cash_state.record_fill(intent.symbol, final_qty, entry_price)
 
     # Record trade count for daily limit persistence
     record_trade_taken()
@@ -856,23 +1143,79 @@ def _get_tod_cap_mult() -> float:
     with _lock:
         _approved += 1
 
+    # ── Fate tracking: record approval ───────────────────────────
+    from src.monitoring.intent_fate import fate_tracker
+    fate_tracker.record_risk_verdict(
+        intent.intent_id, intent.symbol, approved=True,
+    )
 
-def _publish_rejected(intent: TradeIntent, reasons: list) -> None:
-    """Publish a rejected OrderPlan with reason codes."""
+
+# ── Structured risk reject codes ─────────────────────────────────────
+
+from enum import Enum as _Enum
+
+
+class PlanReject(str, _Enum):
+    SESSION_BLOCK = "session_block"
+    QUOTE_QUALITY = "quote_quality"
+    MAX_POSITIONS = "max_positions"
+    PORTFOLIO_HEAT = "portfolio_heat"
+    SIZE_ZERO = "size_zero"
+    STOP_INVALID = "stop_invalid"
+    R_MULT_TOO_LOW = "r_mult_too_low"
+    NOTIONAL_TOO_SMALL = "notional_too_small"
+    DUPLICATE_SYMBOL = "duplicate_symbol"
+    REGIME_BLOCK = "regime_block"
+    RISK_CAP = "risk_cap"
+    SECTOR_LIMIT = "sector_limit"
+    ALLOCATION_FULL = "allocation_full"
+    CIRCUIT_BREAKER = "circuit_breaker"
+    RISK_GUARD = "risk_guard"
+    SIZING_ERROR = "sizing_error"
+    OTHER = "other"
+
+
+def reject_plan(intent: TradeIntent, code: PlanReject, detail: str, **ctx) -> None:
+    """Structured risk rejection — logs machine-readable code, publishes event."""
     global _rejected
+
+    log.info(
+        "risk orderplanrejected sym=%s code=%s detail=%s ctx=%s",
+        intent.symbol, code.value, detail, ctx,
+    )
+
+    # ── Fate tracking: record rejection ──────────────────────────
+    from src.monitoring.intent_fate import fate_tracker, RiskFate
+    _FATE_MAP = {
+        "session_block": RiskFate.SESSION_BLOCK,
+        "quote_quality": RiskFate.QUOTE_QUALITY,
+        "max_positions": RiskFate.MAX_POSITIONS,
+        "portfolio_heat": RiskFate.PORTFOLIO_HEAT,
+        "size_zero": RiskFate.SIZE_ZERO,
+        "stop_invalid": RiskFate.STOP_INVALID,
+        "r_mult_too_low": RiskFate.R_MULT_TOO_LOW,
+        "notional_too_small": RiskFate.NOTIONAL_TOO_SMALL,
+        "duplicate_symbol": RiskFate.DUPLICATE_SYMBOL,
+        "regime_block": RiskFate.REGIME_BLOCK,
+        "risk_cap": RiskFate.RISK_CAP,
+        "sector_limit": RiskFate.SECTOR_LIMIT,
+        "allocation_full": RiskFate.ALLOCATION_FULL,
+        "circuit_breaker": RiskFate.CIRCUIT_BREAKER,
+        "risk_guard": RiskFate.RISK_GUARD,
+        "sizing_error": RiskFate.SIZING_ERROR,
+    }
+    fate_reason = _FATE_MAP.get(code.value, RiskFate.OTHER).value
+    fate_tracker.record_risk_verdict(
+        intent.intent_id, intent.symbol,
+        approved=False, reason=fate_reason,
+    )
 
     plan = OrderPlan(
         symbol=intent.symbol,
         intent_id=intent.intent_id,
+        candidate_id=(getattr(intent, "candidate_id", "") or make_candidate_id(intent.symbol, intent.setup_type or "risk", time.time())),
         qty=0,
-        trail_params={"rejected": True, "reasons": reasons},
-    )
-
-    log.info(
-        "Trade REJECTED  symbol=%s  intent=%s  reasons=%s",
-        intent.symbol,
-        intent.intent_id,
-        reasons,
+        trail_params={"rejected": True, "code": code.value, "detail": detail, "ctx": ctx},
     )
 
     if _bus is not None:
@@ -882,6 +1225,100 @@ def _publish_rejected(intent: TradeIntent, reasons: list) -> None:
 
     with _lock:
         _rejected += 1
+
+
+def _publish_rejected(intent: TradeIntent, reasons: list) -> None:
+    """Legacy wrapper — delegates to reject_plan with best-effort code mapping."""
+    _r0 = reasons[0] if reasons else ""
+    _CODE_MAP = {
+        "invalid_entry_zone": PlanReject.STOP_INVALID,
+        "invalid_invalidation_price": PlanReject.STOP_INVALID,
+        "zero_risk_per_share": PlanReject.STOP_INVALID,
+        "sizing_error": PlanReject.SIZING_ERROR,
+        "zero_shares": PlanReject.SIZE_ZERO,
+        "risk_cap_exceeded": PlanReject.RISK_CAP,
+        "regime_panic_long_block": PlanReject.REGIME_BLOCK,
+        "sector_limit_block": PlanReject.SECTOR_LIMIT,
+        "allocation_bucket_full": PlanReject.ALLOCATION_FULL,
+        "circuit_breaker": PlanReject.CIRCUIT_BREAKER,
+        "risk_guard": PlanReject.RISK_GUARD,
+        "risk_guard_error": PlanReject.RISK_GUARD,
+        "session_policy": PlanReject.SESSION_BLOCK,
+    }
+    code = PlanReject.OTHER
+    for key, mapped in _CODE_MAP.items():
+        if key in _r0:
+            code = mapped
+            break
+    if "session_gate" in _r0:
+        code = PlanReject.SESSION_BLOCK
+    if "session_policy" in _r0:
+        code = PlanReject.SESSION_BLOCK
+
+    # ── Risk telemetry: map to taxonomy reason ───────────────────────
+    _TAXONOMY_MAP = {
+        "invalid_entry_zone": RiskRejectReason.STOP_INVALID,
+        "invalid_invalidation_price": RiskRejectReason.STOP_INVALID,
+        "zero_risk_per_share": RiskRejectReason.STOP_INVALID,
+        "sizing_error": RiskRejectReason.SIZING_ERROR,
+        "zero_shares": RiskRejectReason.SIZE_ZERO,
+        "risk_cap_exceeded": RiskRejectReason.RISK_BUDGET,
+        "regime_panic_long_block": RiskRejectReason.REGIME_THROTTLE,
+        "sector_limit_block": RiskRejectReason.SECTOR_LIMIT,
+        "allocation_bucket_full": RiskRejectReason.ALLOCATION_FULL,
+        "circuit_breaker": RiskRejectReason.CIRCUIT_BREAKER,
+        "risk_guard": RiskRejectReason.RISK_GUARD,
+        "risk_guard_error": RiskRejectReason.RISK_GUARD,
+        "session_policy": RiskRejectReason.SESSION_RULE,
+    }
+    _taxonomy_reason = RiskRejectReason.OTHER
+    for key, mapped in _TAXONOMY_MAP.items():
+        if key in _r0:
+            _taxonomy_reason = mapped
+            break
+    if "session_gate" in _r0:
+        _taxonomy_reason = RiskRejectReason.SESSION_RULE
+    if "session_policy" in _r0:
+        _taxonomy_reason = RiskRejectReason.SESSION_RULE
+
+    _candidate_id = getattr(intent, "candidate_id", "") or make_candidate_id(
+        intent.symbol,
+        intent.setup_type or "risk",
+        intent.ts.timestamp() if hasattr(intent.ts, "timestamp") else time.time(),
+    )
+    reject_monitor.record_reject(
+        candidate_id=_candidate_id,
+        intent_id=intent.intent_id,
+        order_id="",
+        symbol=intent.symbol,
+        stage=RejectStage.RISK,
+        reject_type=RejectType.RISK,
+        reject_reason_code=_taxonomy_reason.value.upper(),
+        reject_message=",".join(str(r) for r in reasons),
+        session_label=(intent.session or get_us_equity_session()),
+        strategy_id=intent.setup_type or "risk",
+        ts_event=time.time(),
+        raw_context={
+            "plan_reject_code": code.value,
+            "reasons": [str(r) for r in reasons],
+        },
+    )
+    funnel_ledger.record(
+        event_type=FunnelEvent.RISK_BLOCKED,
+        candidate_id=_candidate_id,
+        symbol=intent.symbol,
+        strategy_id=intent.setup_type or "risk",
+        session_label=(intent.session or get_us_equity_session()),
+        block_reason=_taxonomy_reason.value.upper(),
+        emitted_intent_id=intent.intent_id,
+        notes=",".join(str(r) for r in reasons),
+        event_ts=time.time(),
+    )
+
+    _risk_telemetry.record_reject(_taxonomy_reason)
+    _throughput.record_risk_reject(intent.symbol, _taxonomy_reason.value)
+
+    reject_plan(intent, code, ",".join(reasons))
 
 
 # ── Open plan candidate handler ───────────────────────────────────
@@ -1284,6 +1721,7 @@ def _build_and_publish_blueprint(draft: PlanDraft, cand: OpenPlanCandidate) -> N
                 sector=getattr(draft, "sector", ""),
                 industry=getattr(draft, "industry", ""),
                 sector_state=getattr(draft, "sector_state", ""),
+                session=cand.session,
             )
             if _bus is not None:
                 _bus.publish(ORDER_BLUEPRINT, bp)
@@ -1348,8 +1786,11 @@ def _build_and_publish_blueprint(draft: PlanDraft, cand: OpenPlanCandidate) -> N
         quality=draft.quality,
         stop_distance_pct=draft.stop_distance_pct,
         reason_codes=list(draft.reason_codes)[:8],
-        notes=f"premarket_blueprint entry_ladder={len(ladder)}"
-              + (" escalation=true" if escalation else ""),
+        notes=(
+            f"premarket_blueprint entry_ladder={len(ladder)}"
+            f" offhours_session={cand.session}"
+            + (" escalation=true" if escalation else "")
+        ),
         impact_score=draft.impact_score,
         burst_flag=draft.burst_flag,
         escalation=escalation,
@@ -1357,6 +1798,7 @@ def _build_and_publish_blueprint(draft: PlanDraft, cand: OpenPlanCandidate) -> N
         sector=getattr(draft, "sector", ""),
         industry=getattr(draft, "industry", ""),
         sector_state=getattr(draft, "sector_state", ""),
+        session=cand.session,
     )
 
     log.info(
@@ -1430,6 +1872,15 @@ def main() -> None:
         _MAX_RISK_USD,
         settings.heartbeat_interval_s,
     )
+
+    # ── Resolved config: log + assert AH coherence ──────────────
+    from config.runtime import get_resolved_config as _get_rcfg
+    _rcfg = _get_rcfg()
+    _rcfg.log_startup_table()
+    try:
+        _rcfg.assert_ah_coherence()
+    except RuntimeError:
+        log.error("risk arm: AH coherence check FAILED — continuing with degraded config")
 
     _bus = _connect_bus()
 
@@ -1532,11 +1983,46 @@ def main() -> None:
             tick, recv, appr, rej, drafts, bps, heat_str, breaker_str, _sector_top_str, _vol_top_str, _rot_top_str, _alloc_hb_str, _mm_hb_str, _sc_hb_str, _exit_hb_str, _tune_hb_str, _ort_hb_str,
         )
 
+        # ── Risk telemetry heartbeat ─────────────────────────────────
+        _risk_telemetry.log_heartbeat()
+        _throughput.log_funnel()
+
+        # Fate conservation heartbeat (every 10 ticks)
+        if tick % 10 == 0:
+            try:
+                from src.monitoring.intent_fate import fate_tracker
+                fate_tracker.log_conservation()
+            except Exception:
+                pass
+
+        if tick % 30 == 0:
+            try:
+                funnel_ledger.log_reconciliation()
+            except Exception:
+                pass
+
+        if tick % 20 == 0:
+            try:
+                log.info(reject_monitor.format_report(limit=10))
+            except Exception:
+                pass
+
         _stop_event.wait(settings.heartbeat_interval_s)
         if _stop_event.is_set():
             break
 
     # Cleanup
+    _risk_telemetry.log_whatif_report()
+    _throughput.log_funnel()
+    _throughput.log_regime_heatmap()
+    try:
+        funnel_ledger.log_reconciliation()
+    except Exception:
+        pass
+    try:
+        log.info(reject_monitor.format_report(limit=20))
+    except Exception:
+        pass
     if _bus is not None:
         try:
             _bus.close()

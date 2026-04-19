@@ -44,6 +44,13 @@ from src.schemas.messages import (
     OpenPlanCandidate,
 )
 from src.market.session import get_us_equity_session, OFF_HOURS, PREMARKET
+import config.runtime as _rtcfg
+from src.policies.session_policy import (
+    SessionContext,
+    QuoteContext,
+    VenuePolicy,
+    can_emit_entry,
+)
 from src.utils.playbook_io import load_playbook_symbols, load_playbook_drafts
 from src.signals.regime import (
     update_index as _regime_update_index,
@@ -148,8 +155,24 @@ from src.signals.agent_intel import (
     get_symbol_intel as _agent_intel,
     get_all_active_intel as _agent_all_active,
 )
+from src.risk.regime_throttle import (
+    get_throttle as _get_throttle,
+    select_intent_mode as _select_intent_mode,
+    probe_budget as _probe_budget,
+    get_intent_budget as _get_intent_budget,
+    intent_budget_tracker as _intent_budget_tracker,
+)
+from src.monitoring.throughput_dashboard import throughput as _throughput
+from src.monitoring.funnel_ledger import (
+    funnel_ledger,
+    FunnelEvent,
+    make_candidate_id,
+)
+from src.monitoring.reject_event_monitor import reject_monitor, RejectStage, RejectType
+from src.monitoring.funnel_probe import funnel_probe
 
 log = get_logger("signal")
+_runtime_cfg = _rtcfg.get_resolved_config()
 
 # ── Tunables (all overridable via env) ───────────────────────────────
 _RSI_THRESHOLD = float(os.environ.get("TL_SIG_RSI_THRESHOLD", "35"))
@@ -759,6 +782,17 @@ def _emit_intent(
     global _intents_emitted
 
     session = get_us_equity_session()
+    if not getattr(intent, "candidate_id", ""):
+        intent.candidate_id = make_candidate_id(intent.symbol, intent.setup_type or "signal", now)
+    funnel_ledger.record_candidate_created(
+        candidate_id=intent.candidate_id,
+        symbol=intent.symbol,
+        strategy_id=intent.setup_type or "signal",
+        session_label=session,
+        event_ts=now,
+        notes=f"intent_id={intent.intent_id}",
+    )
+    funnel_probe.record_candidate_seen()
 
     rsi_str = f"{snap.rsi14:.1f}" if snap.rsi14 is not None else "n/a"
 
@@ -767,10 +801,171 @@ def _emit_intent(
         _update_off_hours_score(intent, sc, snap, now)
         return
 
+    _quote_age_s: Optional[float] = None
+    if hasattr(snap, "ts") and hasattr(snap.ts, "timestamp"):
+        _quote_age_s = max(0.0, now - snap.ts.timestamp())
+
+    _quote_present = snap.last > 0 and snap.bid > 0 and snap.ask > 0
+    _quote_synthetic = (
+        not _quote_present
+        or (snap.volume == 0 and abs(snap.bid - snap.ask) < 1e-9 and abs(snap.last - snap.bid) < 1e-9)
+    )
+
+    _venue_policy = VenuePolicy(
+        allow_entries_rth=True,
+        allow_entries_pre=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        allow_entries_afterhours=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        manage_enabled_when_entry_blocked=True,
+        require_live_quotes=bool(_runtime_cfg.require_live_quotes),
+        synthetic_ok=bool(_runtime_cfg.synthetic_ok),
+        quote_stale_after_s=float(os.environ.get("TL_POLICY_MAX_QUOTE_AGE_S", "5.0")),
+    )
+
+    _session_decision = can_emit_entry(
+        SessionContext(session=session),
+        QuoteContext(
+            quote_present=_quote_present,
+            quote_age_s=_quote_age_s,
+            is_synthetic=_quote_synthetic,
+        ),
+        _venue_policy,
+    )
+
+    if not _session_decision.entry_enabled:
+        reject_monitor.record_reject(
+            candidate_id=intent.candidate_id,
+            intent_id=intent.intent_id,
+            order_id="",
+            symbol=intent.symbol,
+            stage=RejectStage.SIGNAL,
+            reject_type=RejectType.POLICY,
+            reject_reason_code=str(_session_decision.block_reason or "SESSION_POLICY_BLOCK").upper(),
+            reject_message=(
+                f"session_label={_session_decision.session_label} "
+                f"mode={_session_decision.mode}"
+            ),
+            session_label=_session_decision.session_label,
+            strategy_id=intent.setup_type or "signal",
+            ts_event=now,
+            raw_context={
+                "manage_enabled": _session_decision.manage_enabled,
+                "require_live_quotes": _session_decision.require_live_quotes,
+                "synthetic_ok": _session_decision.synthetic_ok,
+            },
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.SESSION_BLOCKED,
+            candidate_id=intent.candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "signal",
+            session_label=_session_decision.session_label,
+            block_reason=_session_decision.block_reason,
+            notes=f"mode={_session_decision.mode}",
+            event_ts=now,
+        )
+        log.info(
+            "signal_session_gate symbol=%s session_label=%s mode=%s block_reason=%s "
+            "require_live_quotes=%s synthetic_ok=%s paper_ah_test=%s",
+            intent.symbol,
+            _session_decision.session_label,
+            _session_decision.mode,
+            _session_decision.block_reason,
+            _session_decision.require_live_quotes,
+            _session_decision.synthetic_ok,
+            _runtime_cfg.paper_ah_test,
+        )
+        funnel_probe.record_signal_session_reject()
+        _fp = funnel_probe.snapshot()
+        log.info(
+            "FUNNEL_PROBE candidates_seen=%d signal_session_policy_rejects=%d execution_session_policy_rejects=%d",
+            _fp.total_candidates_seen,
+            _fp.signal_session_policy_rejects,
+            _fp.execution_session_policy_rejects,
+        )
+        _throughput.record_signal_reject(_session_decision.block_reason or "SESSION_POLICY_BLOCK")
+        if _session_decision.session_label in ("PRE", "AFTERHOURS"):
+            _update_off_hours_score(intent, sc, snap, now)
+        return
+
+    # ── Enrich signal-to-risk contract ───────────────────────────────
+    _regime_now = _get_regime()
+    _sa_now = _get_sector_alignment(intent.symbol)
+    _rot_now = _rotation_compute(intent.symbol)
+    _spread_now = (
+        (snap.ask - snap.bid) / snap.last * 10000
+        if snap.bid > 0 and snap.ask > 0 and snap.last > 0
+        else 0.0
+    )
+    _throttle = _get_throttle(_regime_now.regime, session)
+
+    intent.unified_score = float(sc.last_event_score)
+    intent.regime = _regime_now.regime
+    intent.session = session
+    intent.sector_heat = getattr(_sa_now, "sector_state", "")
+    intent.rotation_state = _rot_now.rotation_state
+    intent.spread_bps = round(_spread_now, 2)
+    intent.regime_score_mult = _throttle.score_mult
+    intent.regime_cap_mult = _throttle.cap_mult
+    intent.regime_max_pos = _throttle.max_pos
+    intent.risk_slot = f"{sc.last_bucket}|cap={_throttle.cap_mult:.2f}"
+
+    # ── Mode selection via throttle ──────────────────────────────────
+    _mode = _select_intent_mode(intent.unified_score, _throttle)
+    if not _mode:
+        funnel_ledger.record(
+            event_type=FunnelEvent.DEFERRED,
+            candidate_id=intent.candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "signal",
+            session_label=session,
+            block_reason="THROTTLE_SUPPRESS",
+            event_ts=now,
+        )
+        log.info(
+            "throttle_suppress symbol=%s regime=%s session=%s "
+            "score=%.1f score_mult=%.2f cap_mult=%.2f",
+            intent.symbol, _regime_now.regime, session,
+            intent.unified_score, _throttle.score_mult, _throttle.cap_mult,
+        )
+        _throughput.record_signal_reject("throttle_suppress")
+        return
+    intent.mode = _mode
+
+    # ── Probe budget accounting ──────────────────────────────────────
+    if _mode == "MIN_PROBE":
+        _probe_budget.record_probe()
+
+    # ── Intent budget check ──────────────────────────────────────────
+    _budget = _get_intent_budget(_regime_now.regime, session)
+    _budget_reason = _intent_budget_tracker.budget_block_reason(intent.symbol, _budget)
+    if _budget_reason:
+        funnel_ledger.record(
+            event_type=FunnelEvent.DEFERRED,
+            candidate_id=intent.candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "signal",
+            session_label=session,
+            block_reason=str(_budget_reason).upper(),
+            event_ts=now,
+        )
+        log.info(
+            "budget_block symbol=%s reason=%s regime=%s session=%s",
+            intent.symbol, _budget_reason, _regime_now.regime, session,
+        )
+        _throughput.record_signal_reject(_budget_reason)
+        return
+
     # ── Normal session: publish TradeIntent ──────────────────────────
     log.info(
         "TradeIntent emitted  setup=%s  symbol=%s  last=%.2f  rsi14=%s  "
-        "conf=%.2f  entry=[%.2f,%.2f]  inv=%.2f  session=%s  reasons=%s",
+        "conf=%.2f  entry=[%.2f,%.2f]  inv=%.2f  session=%s  mode=%s  "
+        "regime=%s  score=%.1f  reasons=%s",
         intent.setup_type,
         intent.symbol,
         snap.last,
@@ -780,13 +975,29 @@ def _emit_intent(
         intent.entry_zone_high,
         intent.invalidation,
         session,
+        intent.mode,
+        intent.regime,
+        intent.unified_score,
         intent.reason_codes,
     )
 
     if _bus is not None:
         _bus.publish(TRADE_INTENT, intent)
+        funnel_ledger.record(
+            event_type=FunnelEvent.INTENT_EMITTED,
+            candidate_id=intent.candidate_id,
+            symbol=intent.symbol,
+            strategy_id=intent.setup_type or "signal",
+            session_label=session,
+            emitted_intent_id=intent.intent_id,
+            event_ts=now,
+        )
     else:
         log.warning("Bus unavailable — intent for %s not published", intent.symbol)
+
+    # ── Post-publish bookkeeping ─────────────────────────────────────
+    _intent_budget_tracker.record_emission(intent.symbol)
+    _throughput.record_intent_emitted(intent.symbol, intent.regime, session)
 
     with _lock:
         sc.last_intent_ts = now
@@ -1011,6 +1222,7 @@ def _publish_off_hours_board() -> None:
         if not _off_hours_board:
             return
         board_items = list(_off_hours_board.items())
+    _ts_now = time.time()
 
     # ── Build close-lists for correlation (under cache lock) ─────────
     with _lock:
@@ -1299,6 +1511,25 @@ def _publish_off_hours_board() -> None:
             market_score=_mkt_sc,
             composite_score=_comp_sc,
         )
+        _cand_id = make_candidate_id(sym, "off_hours_board", _ts_now)
+        plan_cand.reason_codes = list(plan_cand.reason_codes) + [f"candidate_id={_cand_id}"]
+        watch.reason_codes = list(watch.reason_codes) + [f"candidate_id={_cand_id}"]
+        funnel_ledger.record_candidate_created(
+            candidate_id=_cand_id,
+            symbol=sym,
+            strategy_id="off_hours_board",
+            session_label=session,
+            event_ts=_ts_now,
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.WATCHLIST_ONLY,
+            candidate_id=_cand_id,
+            symbol=sym,
+            strategy_id="off_hours_board",
+            session_label=session,
+            block_reason="OFFHOURS_WATCHLIST_ONLY",
+            event_ts=_ts_now,
+        )
         log.info(
             "open_plan_candidate_created symbol=%s score=%d strategy=%s gate_pass=%s sector=%s",
             sym, _sym_es, "off_hours_board", _gate_pass, _sp.sector,
@@ -1572,6 +1803,7 @@ def _publish_premarket_board() -> None:
         if not _premarket_board:
             return
         board_items = list(_premarket_board.items())
+    _ts_now = time.time()
 
     # ── HARD filters ─────────────────────────────────────────────────
     filtered: list = []
@@ -1671,6 +1903,8 @@ def _publish_premarket_board() -> None:
             market_score=_mkt_sc,
             composite_score=_comp_sc,
         )
+        _cand_id = make_candidate_id(sym, "premarket_board", _ts_now)
+        plan_cand.reason_codes = list(plan_cand.reason_codes) + [f"candidate_id={_cand_id}"]
         log.info(
             "open_plan_candidate_created symbol=%s score=%d strategy=%s gate_pass=%s sector=%s",
             sym, _sym_es, "premarket_board", _gate_pass, _sp.sector,
@@ -1697,6 +1931,23 @@ def _publish_premarket_board() -> None:
             industry_score=_ind_sc,
             market_score=_mkt_sc,
             composite_score=_comp_sc,
+        )
+        watch.reason_codes = list(watch.reason_codes) + [f"candidate_id={_cand_id}"]
+        funnel_ledger.record_candidate_created(
+            candidate_id=_cand_id,
+            symbol=sym,
+            strategy_id="premarket_board",
+            session_label="PRE",
+            event_ts=_ts_now,
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.WATCHLIST_ONLY,
+            candidate_id=_cand_id,
+            symbol=sym,
+            strategy_id="premarket_board",
+            session_label="PRE",
+            block_reason="PREMARKET_WATCHLIST_ONLY",
+            event_ts=_ts_now,
         )
 
         if _bus is not None:
@@ -2237,28 +2488,27 @@ def _adaptive_spread_limit(snap: MarketSnapshot, phase: str) -> float:
 # ── Regime strategy gate (D) ────────────────────────────────────────
 
 def _regime_allows(strat_name: str, regime: str) -> bool:
-    """Return True if regime gate allows *strat_name*.
+    """Return True if regime throttle allows *strat_name*.
 
+    Replaced hard boolean ``STRATEGY_GATE`` with throttle-aware check:
+    any regime with positive ``score_mult`` is allowed (sizing is
+    reduced through the throttle pipeline).  HALT still hard-blocks.
     When ``_REGIME_GATE_ENABLED`` is False, always returns True.
     """
     global _obs_regime_gate_armed, _obs_regime_gate_fired
     _obs_regime_gate_armed += 1
     if not _REGIME_GATE_ENABLED:
         return True
-    # Map internal strategy names → gate-set keys
-    _NAME_MAP = {
-        "DEV_MOMENTUM": "momentum",
-        "mean_revert_rsi": "mean_revert_rsi",
-        "consensus_news": "consensus_news",
-        "volatility_breakout": "breakout",
-    }
-    gate_name = _NAME_MAP.get(strat_name, strat_name)
-    allowed = _STRATEGY_GATE.get(regime, set())
-    if gate_name not in allowed:
+    session = get_us_equity_session()
+    throttle = _get_throttle(regime, session)
+    if throttle.score_mult <= 0:
+        # HALT or equivalent — hard block
         _obs_regime_gate_fired += 1
         _blocked_counts[strat_name] = _blocked_counts.get(strat_name, 0) + 1
         _blocked_reasons["regime_gate"] = _blocked_reasons.get("regime_gate", 0) + 1
-    return gate_name in allowed
+        return False
+    # All non-zero throttle regimes are allowed — sizing limited downstream
+    return True
 
 
 # ── EventScore gate helper ──────────────────────────────────────────
@@ -2340,10 +2590,30 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
     # ── Guard: cooldown ─────────────────────────────────────────────
     effective_cooldown = _COOLDOWN_CONSENSUS_S if sc.last_intent_consensus else _COOLDOWN_S
     if (now - sc.last_intent_ts) < effective_cooldown:
+        _dup_id = make_candidate_id(snap.symbol, "cooldown", now)
+        funnel_ledger.record(
+            event_type=FunnelEvent.DUPLICATE_SUPPRESSED,
+            candidate_id=_dup_id,
+            symbol=snap.symbol,
+            strategy_id="evaluate",
+            session_label=session,
+            block_reason="COOLDOWN_ACTIVE",
+            event_ts=now,
+        )
         return
 
     # ── Guard: hourly cap ───────────────────────────────────────────
     if not _hourly_cap_ok(snap.symbol, now):
+        _dup_id = make_candidate_id(snap.symbol, "hourly_cap", now)
+        funnel_ledger.record(
+            event_type=FunnelEvent.DUPLICATE_SUPPRESSED,
+            candidate_id=_dup_id,
+            symbol=snap.symbol,
+            strategy_id="evaluate",
+            session_label=session,
+            block_reason="HOURLY_CAP",
+            event_ts=now,
+        )
         return
 
     # ── Unified Event Score (observability + future gating) ──────────
@@ -2736,6 +3006,8 @@ def _evaluate(snap: MarketSnapshot, sc: SymbolCache) -> None:
             elif _current_regime == "CHOP":
                 _regime_adj = +5    # 30 → 35: tighten vol gate in CHOP
         _effective_min = max(10, _base_min + _gate_reduction + _regime_adj)
+        if settings.is_paper and get_us_equity_session() == OFF_HOURS:
+            _effective_min = max(8, _effective_min - 2)
         if _gate_reduction != 0:
             log.debug(
                 "gate_bias_applied sym=%s strat=%s base_min=%d bias=%.1f effective_min=%d",
@@ -3230,6 +3502,47 @@ def _maybe_force_intent(cache_snapshot: Dict[str, Optional[MarketSnapshot]]) -> 
         chosen_sym, last, intent.entry_zone_low, intent.entry_zone_high,
     )
 
+    _quote_age_s: Optional[float] = None
+    if hasattr(snap, "ts") and hasattr(snap.ts, "timestamp"):
+        _quote_age_s = max(0.0, now - snap.ts.timestamp())
+    _quote_present = snap.last > 0 and snap.bid > 0 and snap.ask > 0
+    _quote_synthetic = (
+        not _quote_present
+        or (snap.volume == 0 and abs(snap.bid - snap.ask) < 1e-9 and abs(snap.last - snap.bid) < 1e-9)
+    )
+    _forced_decision = can_emit_entry(
+        SessionContext(session=get_us_equity_session()),
+        QuoteContext(
+            quote_present=_quote_present,
+            quote_age_s=_quote_age_s,
+            is_synthetic=_quote_synthetic,
+        ),
+        VenuePolicy(
+            allow_entries_rth=True,
+            allow_entries_pre=(
+                bool(_runtime_cfg.allow_extended)
+                and bool(_runtime_cfg.ah_entry_enabled)
+            ),
+            allow_entries_afterhours=(
+                bool(_runtime_cfg.allow_extended)
+                and bool(_runtime_cfg.ah_entry_enabled)
+            ),
+            manage_enabled_when_entry_blocked=True,
+            require_live_quotes=bool(_runtime_cfg.require_live_quotes),
+            synthetic_ok=bool(_runtime_cfg.synthetic_ok),
+            quote_stale_after_s=float(os.environ.get("TL_POLICY_MAX_QUOTE_AGE_S", "5.0")),
+        ),
+    )
+    if not _forced_decision.entry_enabled:
+        log.info(
+            "forced_intent_blocked symbol=%s session=%s reason=%s mode=%s",
+            chosen_sym,
+            _forced_decision.session_label,
+            _forced_decision.block_reason,
+            _forced_decision.mode,
+        )
+        return
+
     _bus.publish(TRADE_INTENT, intent)
 
     with _lock:
@@ -3341,6 +3654,21 @@ def main() -> None:
         _DEV_STRATEGY,
         _MAX_INTENTS_PER_SYMBOL_PER_HOUR,
     )
+
+    if settings.is_paper:
+        log.info(
+            "paper_gate_config  min_rsi=%d  min_consensus=%d  min_dev=%d",
+            _ES_MIN_RSI, _ES_MIN_CONSENSUS, _ES_MIN_DEV,
+        )
+
+    # ── Resolved config: log + assert AH coherence ──────────────
+    from config.runtime import get_resolved_config as _get_rcfg
+    _rcfg = _get_rcfg()
+    _rcfg.log_startup_table()
+    try:
+        _rcfg.assert_ah_coherence()
+    except RuntimeError:
+        log.error("signal arm: AH coherence check FAILED — continuing with degraded config")
 
     # ── Force-path calibration banner ─────────────────────────────
     _force_regime = os.environ.get("TL_TEST_FORCE_REGIME", "")

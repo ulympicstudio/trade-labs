@@ -28,10 +28,12 @@ from src.monitoring.logger import get_logger
 from src.bus.topics import (
     HEARTBEAT, NEWS_EVENT, WATCH_CANDIDATE, TRADE_INTENT,
     PLAN_DRAFT, OPEN_PLAN_CANDIDATE, ORDER_BLUEPRINT, ORDER_EVENT,
+    ORDER_PLAN_REJECTED,
 )
 from src.schemas.messages import (
     Heartbeat, NewsEvent, WatchCandidate, TradeIntent,
     PlanDraft, OpenPlanCandidate, OrderBlueprint, OrderEvent,
+    OrderPlan,
 )
 from src.market.session import get_us_equity_session, OFF_HOURS, PREMARKET
 from src.signals.sector_intel import get_sector_summary as _get_sector_summary
@@ -105,6 +107,8 @@ from src.analysis.dashboard_snapshot import DashboardSnapshot
 from src.signals.agent_intel import get_all_active_intel as _get_all_agent_intel
 from src.risk.kill_switch import status_summary as _ks_status_summary
 from src.analysis.agent_intel_loader import AgentIntelLoader
+from src.monitoring.throughput_dashboard import throughput as _throughput
+from src.risk.reject_taxonomy import risk_telemetry as _risk_telemetry
 
 _VOL_MONITOR_ENABLED = os.environ.get("TL_VOL_MONITOR_ENABLED", "true").lower() in ("1", "true", "yes")
 
@@ -459,6 +463,30 @@ def _on_watch_candidate(msg: WatchCandidate) -> None:
 def _on_trade_intent(msg: TradeIntent) -> None:
     """Ingest a TradeIntent confidence into the board as a score."""
     _board_record_score(msg.symbol, msg.confidence)
+
+
+# ── OrderPlanRejected handler ─────────────────────────────────────────
+
+_plan_rejected_count: int = 0
+_plan_rejected_lock = threading.Lock()
+
+
+def _on_order_plan_rejected(msg: OrderPlan) -> None:
+    """Consume rejected order plans so they are not bus-dropped.
+
+    Increments a telemetry counter and logs the rejection details.
+    """
+    global _plan_rejected_count
+    trail = msg.trail_params or {}
+    code = trail.get("code", "unknown")
+    detail = trail.get("detail", "")
+    with _plan_rejected_lock:
+        _plan_rejected_count += 1
+        _cnt = _plan_rejected_count
+    log.info(
+        "order_plan_rejected sym=%s code=%s detail=%s total=%d",
+        msg.symbol, code, detail, _cnt,
+    )
 
 
 # ── PlanDraft / OpenPlanCandidate handlers ───────────────────────────
@@ -1090,6 +1118,62 @@ def _print_dynamic_universe_summary() -> None:
     log.info("dynamic_universe_summary\n%s", "\n".join(lines))
 
 
+# ── Throughput funnel printer ────────────────────────────────────────
+
+def _print_throughput_summary() -> None:
+    """Log a rolling table of the last N cycles' funnel + risk what-if."""
+    # Record this cycle's snapshot into the rolling history
+    _throughput.record_cycle_snapshot()
+
+    history = _throughput.get_funnel_table(6)
+    if not history:
+        return
+
+    lines = ["THROUGHPUT FUNNEL (last cycles)", ""]
+    lines.append(
+        f"  {'cycle':>5}  {'seen':>6}  {'intents':>7}  "
+        f"{'approved':>8}  {'rejected':>8}  {'orders':>6}  {'fills':>5}  {'pnl':>8}"
+    )
+    lines.append("  " + "-" * 70)
+    for i, s in enumerate(history, 1):
+        lines.append(
+            f"  {i:>5}  {s.candidates_seen:>6}  {s.intents_emitted:>7}  "
+            f"{s.risk_approved:>8}  {s.risk_rejected:>8}  "
+            f"{s.orders_submitted:>6}  {s.fills:>5}  ${s.total_pnl:>7.2f}"
+        )
+
+    # Latest funnel rate
+    latest = history[-1]
+    total_risk = latest.risk_approved + latest.risk_rejected
+    approval_pct = (
+        latest.risk_approved / total_risk * 100 if total_risk > 0 else 0
+    )
+    fill_rate = (
+        latest.fills / latest.orders_submitted * 100
+        if latest.orders_submitted > 0
+        else 0
+    )
+    lines.append("")
+    lines.append(
+        f"  Approval rate: {approval_pct:.0f}%  "
+        f"Fill rate: {fill_rate:.0f}%  "
+        f"Status: {'TRADING' if latest.fills > 0 else ('MUTED' if latest.intents_emitted > 0 else 'IDLE')}"
+    )
+
+    # Risk what-if summary (from shared singleton)
+    summary = _risk_telemetry.get_summary()
+    if summary["intents_seen"] > 0:
+        shadow = summary["shadow_approvals"]
+        rejected = summary["rejected"]
+        lines.append(
+            f"  Risk what-if: {summary['approved']} approved, "
+            f"{rejected} rejected, "
+            f"{shadow} shadow-approved at +20% capmult"
+        )
+
+    log.info("throughput_summary\n%s", "\n".join(lines))
+
+
 # ── Top News printer ────────────────────────────────────────────────────
 
 def _print_top_news() -> None:
@@ -1428,10 +1512,12 @@ def _connect_bus():
         bus.subscribe(OPEN_PLAN_CANDIDATE, _on_open_plan_candidate, msg_type=OpenPlanCandidate)
         bus.subscribe(ORDER_BLUEPRINT, _on_order_blueprint, msg_type=OrderBlueprint)
         bus.subscribe(ORDER_EVENT, _on_order_event, msg_type=OrderEvent)
+        bus.subscribe(ORDER_PLAN_REJECTED, _on_order_plan_rejected, msg_type=OrderPlan)
         log.info(
-            "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s on event bus",
+            "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s on event bus",
             HEARTBEAT, NEWS_EVENT, WATCH_CANDIDATE, TRADE_INTENT,
             PLAN_DRAFT, OPEN_PLAN_CANDIDATE, ORDER_BLUEPRINT, ORDER_EVENT,
+            ORDER_PLAN_REJECTED,
         )
         return bus
     except Exception:
@@ -1735,6 +1821,7 @@ def main() -> None:
             _print_tuning_summary()
             _print_intelligence_summary()
             _print_dynamic_universe_summary()
+            _print_throughput_summary()
 
         # ── Playbook (independent cadence) ────────────────────────
         pb_interval = _get_playbook_interval()

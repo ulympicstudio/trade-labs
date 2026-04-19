@@ -14,6 +14,7 @@ from src.signals.market_scanner import (
     ScanResult,
     _looks_like_etf,
     _req_scanner_with_retry,
+    coarse_symbol_allowed,
 )
 from config.universe_filter import STOCK_ALLOWLIST, STOCK_BLOCKLIST
 
@@ -82,6 +83,9 @@ class ScanRotator:
             c = details.contract
             symbol = c.symbol
 
+            if not coarse_symbol_allowed(symbol):
+                continue
+
             # Price floor
             scanner_price = getattr(r, "price", None)
             if scanner_price is not None:
@@ -107,5 +111,5 @@ class ScanRotator:
             except Exception:
                 continue
 
-            out.append(ScanResult(symbol=symbol, rank=int(r.rank)))
+            out.append(ScanResult(symbol=symbol, rank=int(r.rank), source=f"{scan_code}@{location}"))
         return out

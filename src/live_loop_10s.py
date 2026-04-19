@@ -15,7 +15,7 @@ from ib_insync import IB, Stock, util, MarketOrder
 from src.data.ib_market_data import make_contract as _make_ib_contract
 
 from config.identity import SYSTEM_NAME, HUMAN_NAME
-from config.runtime import is_armed, execution_backend, is_paper
+from config.runtime import is_armed, execution_backend, is_paper, get_resolved_config
 from config.ib_config import IB_HOST, IB_PORT
 import os as _os
 IB_CLIENT_ID = int(_os.getenv("TL_LIVELOOP_IB_CLIENT_ID", "10"))
@@ -26,14 +26,24 @@ from src.execution.bracket_orders import (
     place_limit_tp_trail_bracket,
     place_trailing_stop,
 )
-from src.signals.market_scanner import scan_us_most_active_stocks
+from src.signals.market_scanner import (
+    coarse_symbol_allowed,
+    scan_us_most_active_stocks,
+    scanner_mark_restart,
+    scanner_note_request,
+    scanner_note_request_end,
+    scanner_note_stale_callback_ignored,
+    scanner_reset_generation,
+    scanner_session_state,
+    scanner_stability_counters,
+)
 from src.signals.candidate_pool import CandidatePool
 from src.signals.scan_rotator import ScanRotator
 from src.signals.score_candidates import score_scan_results
 from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
 )
-from src.risk.regime import get_regime, RegimeResult
+from src.risk.regime import get_regime
 from src.signals.signal_validator import (
     compute_candidate_metrics,
     passes_hyper_swing_filters,
@@ -78,7 +88,7 @@ BASE_MAX_TOTAL_OPEN_RISK = 0.02
 CONVICTION_MAX_TOTAL_OPEN_RISK = 0.045
 BASE_MAX_CONCURRENT_POSITIONS = 4
 CONVICTION_MAX_CONCURRENT_POSITIONS = 6
-MIN_CATALYST_SCORE = 60.0  # Catalyst score threshold for trading (tuned for higher candidate flow)
+MIN_CATALYST_SCORE = float(os.getenv("TL_MIN_CATALYST_SCORE", "60"))  # Canonical score threshold
 
 # Phase 2: Unified score weights
 UNIFIED_CATALYST_WEIGHT = 0.60
@@ -142,6 +152,7 @@ MIN_BOUNCE_SAMPLE_SIZE_FLOOR = 12
 BASE_MIN_UNIFIED_SCORE_FLOOR = 70.0
 CONVICTION_MIN_UNIFIED_SCORE_FLOOR = 68.0
 BOUNCE_MIN_UNIFIED_SCORE_FLOOR = 68.0
+PAPER_MIN_VOLUME_ACCEL = float(os.getenv("TL_PAPER_MIN_VOLUME_ACCEL", "0.8"))
 BOUNCE_MIN_SAMPLE_SIZE = int(os.getenv(
     "TRADE_LABS_BOUNCE_MIN_SAMPLE_SIZE", str(MIN_BOUNCE_SAMPLE_SIZE_FLOOR)
 ))
@@ -156,6 +167,848 @@ CONVICTION_MIN_UNIFIED_SCORE = float(os.getenv(
 BOUNCE_MIN_UNIFIED_SCORE = float(os.getenv(
     "TRADE_LABS_BOUNCE_MIN_UNIFIED_SCORE", "68"
 ))
+
+# ── Module 1: Universe Gate ──────────────────────────────────────────
+# Pre-IBKR symbol hygiene: cheap metadata rules for exchange, ticker
+# shape, and known bad universes.  Runs before quarantine + contract
+# qualification so obvious junk never touches IBKR at all.
+
+# Known ETF / leveraged / inverse / commodity / crypto tickers that
+# recur in IBKR scanner results.  Static deny — never tradeable by UTS.
+_TICKER_DENY_SET: frozenset[str] = frozenset({
+    # ── Major index ETFs ──
+    "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "IVV", "RSP",
+    "MDY", "IJR", "IJH", "IWB", "IWF", "IWD", "VTV", "VUG",
+    # ── Sector / thematic ETFs ──
+    "XLF", "XLE", "XLK", "XLV", "XLI", "XLB", "XLC", "XLU",
+    "XLP", "XLY", "XLRE", "GDX", "GDXJ", "KRE", "KBE",
+    "SMH", "SOXX", "ARKK", "ARKG", "ARKW", "ARKF", "ARKQ",
+    "XBI", "IBB", "ITB", "XHB", "TAN", "ICLN", "LIT", "HACK",
+    # ── Leveraged / inverse ──
+    "TQQQ", "SQQQ", "SOXL", "SOXS", "TNA", "TZA",
+    "SPXL", "SPXS", "SPXU", "UPRO", "UDOW", "SDOW",
+    "LABU", "LABD", "FNGU", "FNGD", "TECL", "TECS",
+    "FAS", "FAZ", "ERX", "ERY", "NUGT", "DUST", "JNUG", "JDST",
+    "UVXY", "SVXY", "UVIX", "VIXY", "VXX",
+    "TSLL", "TSLS",
+    # ── Commodity / currency / bond ──
+    "GLD", "SLV", "IAU", "USO", "UNG", "KOLD", "BOIL",
+    "UUP", "FXE", "FXY", "FXB", "FXA", "FXC",
+    "TLT", "TBT", "TMF", "TMV", "IEF", "SHY", "BND", "AGG",
+    "LQD", "HYG", "JNK", "EMB",
+    # ── Crypto trusts / ETFs ──
+    "BITO", "GBTC", "ETHE", "MSTR",
+    # ── International / EM ETFs ──
+    "EEM", "EFA", "VWO", "IEMG", "FXI", "KWEB", "MCHI",
+    "EWZ", "EWJ", "EWG", "EWU", "EWY", "EWW", "EWT",
+    # ── REIT / real-estate ETFs ──
+    "VNQ", "IYR", "XLRE", "REM", "MORT",
+    # ── Dividend / low-vol / factor ──
+    "SCHD", "VIG", "DVY", "HDV", "SPHD", "JEPI", "JEPQ",
+})
+
+# Ticker shape: reject preferred shares (trailing digits like ZIONP),
+# warrants (trailing W/WS), units (trailing U), and rights.
+_RE_BAD_TICKER = re.compile(
+    r"(?:"
+    r"^.{1,4}[PW]$"       # preferred / warrant suffix  (ZIONP, ACAHW)
+    r"|^.+WS$"            # warrant-suffix variant      (ACAHWS)
+    r"|^.{1,4}U$"         # unit tickers                (ACACU)
+    r"|^.{1,4}R$"         # rights                      (ACACR)
+    r")",
+    re.I,
+)
+
+# OTC / PINK exchange deny list — these should never reach qualification
+_OTC_EXCHANGES: frozenset[str] = frozenset({
+    "PINK", "OTC", "OTCBB", "GREY", "OTCQX", "OTCQB",
+    "OTCMKTS", "PINKSHEETS",
+})
+
+
+def _filter_valid_candidates(
+    symbols: list,
+    ib: IB,
+    min_score: float,
+    invalid_symbols: set,
+    valid_contracts: dict,
+) -> list:
+    """Pre-filter candidates: universe gate + IB contract check + score threshold.
+
+    Returns only candidates that pass all validation gates.  This helper
+    consolidates the repeated gate/qualify/score logic used for both
+    catalyst and scanner candidate paths.
+    """
+    valid = []
+    for cand in symbols:
+        sym = cand.symbol if hasattr(cand, "symbol") else str(cand)
+        if sym in invalid_symbols:
+            continue
+        gate_ok, gate_reason = _universe_gate(sym)
+        if not gate_ok:
+            invalid_symbols.add(sym)
+            continue
+        if not coarse_symbol_allowed(sym):
+            invalid_symbols.add(sym)
+            continue
+        cat_score = getattr(cand, "catalyst_score", None) or 0.0
+        if cat_score < min_score:
+            continue
+        ok, c, reason = _safe_qualify_contract(ib, sym, valid_contracts)
+        if not ok:
+            if reason != "broker_fault":
+                invalid_symbols.add(sym)
+            continue
+        valid.append(cand)
+    return valid
+
+
+def _universe_gate(symbol: str, exchange: str = "") -> tuple[bool, str]:
+    """Cheap pre-IBKR symbol gate.  No network calls.
+
+    Returns (ok, reason).  reason is empty string on pass.
+    """
+    s = (symbol or "").strip().upper()
+    if not s:
+        return False, "empty"
+    if s in _TICKER_DENY_SET:
+        return False, "denied_ticker"
+    if _RE_BAD_TICKER.match(s):
+        return False, "bad_ticker_shape"
+    ex = (exchange or "").strip().upper()
+    if ex and ex in _OTC_EXCHANGES:
+        return False, "otc_exchange"
+    return True, ""
+
+
+# ── Module 2: Broker Fault Sentinel ──────────────────────────────────
+# Separates infrastructure faults (1100/1102, timeout, KeyError) from
+# symbol-quality rejects so alpha diagnostics stay clean.
+
+_BROKER_FAULT_WINDOW = int(os.getenv("TL_BROKER_FAULT_WINDOW", "300"))   # 5 min
+_BROKER_FAULT_THRESHOLD = int(os.getenv("TL_BROKER_FAULT_THRESHOLD", "5"))  # trip degraded
+
+
+class _BrokerFaultSentinel:
+    __slots__ = (
+        "error_1100", "error_1102", "timeout", "keyerror", "other",
+        "_timestamps", "degraded", "degraded_since",
+    )
+
+    def __init__(self):
+        self.error_1100 = 0
+        self.error_1102 = 0
+        self.timeout = 0
+        self.keyerror = 0
+        self.other = 0
+        self._timestamps: list[float] = []  # rolling window
+        self.degraded = False
+        self.degraded_since: float = 0.0
+
+    @property
+    def total(self) -> int:
+        return self.error_1100 + self.error_1102 + self.timeout + self.keyerror + self.other
+
+    def record(self, exc_msg: str) -> str:
+        """Classify and record a broker fault. Returns fault type string."""
+        msg = (exc_msg or "").lower()
+        now = time.time()
+        if "1100" in msg:
+            self.error_1100 += 1
+            fault_type = "error_1100"
+        elif "1102" in msg:
+            self.error_1102 += 1
+            fault_type = "error_1102"
+        elif "timeout" in msg:
+            self.timeout += 1
+            fault_type = "timeout"
+        elif "keyerror" in msg:
+            self.keyerror += 1
+            fault_type = "keyerror"
+        else:
+            self.other += 1
+            fault_type = "other"
+        self._timestamps.append(now)
+        self._check_degraded(now)
+        return fault_type
+
+    def _check_degraded(self, now: float) -> None:
+        cutoff = now - _BROKER_FAULT_WINDOW
+        self._timestamps = [t for t in self._timestamps if t > cutoff]
+        if len(self._timestamps) >= _BROKER_FAULT_THRESHOLD:
+            if not self.degraded:
+                self.degraded = True
+                self.degraded_since = now
+        else:
+            self.degraded = False
+            self.degraded_since = 0.0
+
+    def log_line(self) -> str:
+        parts = (
+            f"[BROKER] faults={self.total} "
+            f"1100={self.error_1100} 1102={self.error_1102} "
+            f"timeout={self.timeout} keyerror={self.keyerror} "
+            f"other={self.other}"
+        )
+        if self.degraded:
+            age = int(time.time() - self.degraded_since)
+            parts += f" DEGRADED({age}s)"
+        return parts
+
+
+_broker_sentinel = _BrokerFaultSentinel()
+
+
+# ── Upstream funnel counters ─────────────────────────────────────────
+
+_ALLOWED_PRIMARY_EXCHANGES = {
+    "NASDAQ", "NMS", "NYSE", "AMEX", "ARCA", "BATS", "IEX",
+    "MEMX", "EDGEA", "EDGX", "BYX",
+}
+
+_RE_BAD_NAME = [
+    (re.compile(r"\bETF\b", re.I), "etf"),
+    (re.compile(r"\bETN\b", re.I), "etn"),
+    (re.compile(r"\bADR\b", re.I), "adr"),
+    (re.compile(r"\bTRUST\b", re.I), "trust"),
+    (re.compile(r"\bFUND\b", re.I), "fund"),
+    (re.compile(r"\bREIT\b", re.I), "reit"),
+    (re.compile(r"\bCLOSED[- ]?END\b", re.I), "fund"),
+    (re.compile(r"\bLP\b", re.I), "fund"),
+    (re.compile(r"\bINDEX\b", re.I), "etf"),
+    (re.compile(r"\bPROSHARES\b", re.I), "etf"),
+    (re.compile(r"\bULTRA\b", re.I), "etf"),
+    (re.compile(r"\b[23]X\b", re.I), "etf"),
+    (re.compile(r"\bLEVERAGED\b", re.I), "etf"),
+    (re.compile(r"\bINVERSE\b", re.I), "etf"),
+    (re.compile(r"\bNOTES?\b", re.I), "etn"),
+    (re.compile(r"\bSECURITIES\b", re.I), "etf"),
+]
+
+
+class _FunnelCounters:
+    __slots__ = (
+        "scan_raw", "gate_rejected", "deduped",
+        "static_qualified", "static_rejected",
+        "contract_ok", "contract_rejected", "broker_faults",
+        "quarantined",
+        "rej_etf", "rej_adr", "rej_trust", "rej_reit",
+        "rej_etn", "rej_fund", "rej_non_common", "rej_bad_exchange",
+        "rej_contract_invalid", "rej_contract_timeout",
+        "rej_denied_ticker", "rej_bad_ticker_shape", "rej_otc_exchange",
+    )
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self, raw: int = 0):
+        self.scan_raw = raw
+        self.gate_rejected = 0
+        self.deduped = 0
+        self.static_qualified = 0
+        self.static_rejected = 0
+        self.contract_ok = 0
+        self.contract_rejected = 0
+        self.broker_faults = 0
+        self.quarantined = 0
+        self.rej_etf = 0
+        self.rej_adr = 0
+        self.rej_trust = 0
+        self.rej_reit = 0
+        self.rej_etn = 0
+        self.rej_fund = 0
+        self.rej_non_common = 0
+        self.rej_bad_exchange = 0
+        self.rej_contract_invalid = 0
+        self.rej_contract_timeout = 0
+        self.rej_denied_ticker = 0
+        self.rej_bad_ticker_shape = 0
+        self.rej_otc_exchange = 0
+
+    def bump_static_reject(self, reason: str):
+        self.static_rejected += 1
+        attr = f"rej_{reason}"
+        if hasattr(self, attr):
+            setattr(self, attr, getattr(self, attr) + 1)
+
+    def bump_gate_reject(self, reason: str):
+        self.gate_rejected += 1
+        attr = f"rej_{reason}"
+        if hasattr(self, attr):
+            setattr(self, attr, getattr(self, attr) + 1)
+
+    def top_static_reject(self) -> str:
+        pairs = [
+            ("etf", self.rej_etf), ("adr", self.rej_adr),
+            ("trust", self.rej_trust), ("reit", self.rej_reit),
+            ("etn", self.rej_etn), ("fund", self.rej_fund),
+            ("non_common", self.rej_non_common),
+            ("bad_exchange", self.rej_bad_exchange),
+            ("contract_invalid", self.rej_contract_invalid),
+            ("contract_timeout", self.rej_contract_timeout),
+            ("denied_ticker", self.rej_denied_ticker),
+            ("bad_ticker_shape", self.rej_bad_ticker_shape),
+            ("otc_exchange", self.rej_otc_exchange),
+        ]
+        best = max(pairs, key=lambda x: x[1])
+        return best[0] if best[1] > 0 else "none"
+
+    def log_line(self) -> str:
+        vc = _verdict_counts()
+        return (
+            f"[FUNNEL] raw={self.scan_raw} "
+            f"gate_rej={self.gate_rejected} dedup={self.deduped} "
+            f"quarantined={self.quarantined} "
+            f"static_ok={self.static_qualified} static_rej={self.static_rejected} "
+            f"contract_ok={self.contract_ok} contract_rej={self.contract_rejected} "
+            f"broker_faults={self.broker_faults} "
+            f"verdicts(h={vc['hard_deny']}/s={vc['soft_deny']}/b={vc['broker_unstable']}/v={vc['validated']}) "
+            f"top_reject={self.top_static_reject()}"
+        )
+
+
+_funnel = _FunnelCounters()
+
+
+# ── Scanner source quality tracker ──────────────────────────────────
+class _SourceTracker:
+    """Per-scan-source counters: how many symbols each source yields vs rejects."""
+
+    def __init__(self):
+        self._seen: dict[str, int] = {}
+        self._rejected: dict[str, int] = {}
+        self._accepted: dict[str, int] = {}
+
+    def record_seen(self, source: str):
+        if source:
+            self._seen[source] = self._seen.get(source, 0) + 1
+
+    def record_rejected(self, source: str):
+        if source:
+            self._rejected[source] = self._rejected.get(source, 0) + 1
+
+    def record_accepted(self, source: str):
+        if source:
+            self._accepted[source] = self._accepted.get(source, 0) + 1
+
+    def log_line(self) -> str:
+        parts = []
+        for src in sorted(self._seen):
+            s = self._seen.get(src, 0)
+            r = self._rejected.get(src, 0)
+            a = self._accepted.get(src, 0)
+            pct = int(100 * r / s) if s else 0
+            parts.append(f"{src}={a}/{s}({pct}%rej)")
+        return f"[SOURCE] {' '.join(parts)}" if parts else "[SOURCE] (none)"
+
+    def reset(self):
+        self._seen.clear()
+        self._rejected.clear()
+        self._accepted.clear()
+
+
+_source_tracker = _SourceTracker()
+
+
+# ── Symbol verdict cache: tiered confidence with TTLs ─────────────
+# Replaces the simple quarantine with a full verdict taxonomy:
+#   hard_deny      — structurally untradeable (ETF/ADR/trust/etc), long TTL
+#   soft_deny      — failed qualification but might change (contract_invalid), medium TTL
+#   broker_unstable — failed due to infra fault, short TTL (retry soon)
+#   validated      — confirmed common stock, long TTL (skip re-qualification)
+_VERDICT_TTL = {
+    "hard_deny":        int(os.getenv("TL_VERDICT_TTL_HARD",   str(24 * 60 * 60))),  # 24h
+    "soft_deny":        int(os.getenv("TL_VERDICT_TTL_SOFT",   str(6 * 60 * 60))),   # 6h
+    "broker_unstable":  int(os.getenv("TL_VERDICT_TTL_BROKER", str(10 * 60))),        # 10min
+    "validated":        int(os.getenv("TL_VERDICT_TTL_VALID",  str(12 * 60 * 60))),   # 12h
+}
+
+# Reasons that map to hard_deny (structurally permanent)
+_HARD_DENY_REASONS = frozenset({
+    "etf", "etn", "adr", "trust", "fund", "reit",
+    "non_common", "bad_exchange",
+    "denied_ticker", "bad_ticker_shape", "otc_exchange",
+})
+# Reasons that map to soft_deny (might change or be data-quality issue)
+_SOFT_DENY_REASONS = frozenset({
+    "contract_invalid",
+})
+
+
+class _VerdictEntry:
+    __slots__ = ("tier", "reason", "expires_at")
+
+    def __init__(self, tier: str, reason: str, expires_at: float):
+        self.tier = tier
+        self.reason = reason
+        self.expires_at = expires_at
+
+
+_verdicts: dict[str, _VerdictEntry] = {}
+
+
+def _record_verdict(symbol: str, reason: str, tier: str = "") -> None:
+    """Record a symbol verdict. Tier is auto-classified from reason if not given."""
+    if not symbol:
+        return
+    if not tier:
+        if reason in _HARD_DENY_REASONS:
+            tier = "hard_deny"
+        elif reason in _SOFT_DENY_REASONS:
+            tier = "soft_deny"
+        elif reason == "broker_fault" or reason.startswith("broker_"):
+            tier = "broker_unstable"
+        else:
+            tier = "soft_deny"
+    ttl = _VERDICT_TTL.get(tier, _VERDICT_TTL["soft_deny"])
+    _verdicts[symbol.upper()] = _VerdictEntry(
+        tier=tier, reason=reason, expires_at=time.time() + ttl,
+    )
+
+
+def _record_validated(symbol: str) -> None:
+    """Mark symbol as validated common stock (skip future re-qualification)."""
+    if not symbol:
+        return
+    ttl = _VERDICT_TTL["validated"]
+    _verdicts[symbol.upper()] = _VerdictEntry(
+        tier="validated", reason="ok", expires_at=time.time() + ttl,
+    )
+
+
+def _check_verdict(symbol: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (tier, reason) or (None, None) if no active verdict."""
+    if not symbol:
+        return None, None
+    key = symbol.upper()
+    entry = _verdicts.get(key)
+    if entry is None:
+        return None, None
+    if entry.expires_at <= time.time():
+        _verdicts.pop(key, None)
+        return None, None
+    return entry.tier, entry.reason
+
+
+def _verdict_counts() -> dict[str, int]:
+    """Return counts per tier (for heartbeat)."""
+    counts: dict[str, int] = {"hard_deny": 0, "soft_deny": 0, "broker_unstable": 0, "validated": 0}
+    now = time.time()
+    for entry in _verdicts.values():
+        if entry.expires_at > now:
+            counts[entry.tier] = counts.get(entry.tier, 0) + 1
+    return counts
+
+
+def _fast_qualify_symbol_meta(
+    symbol: str,
+    sec_type: str = "",
+    long_name: str = "",
+    primary_exchange: str = "",
+) -> tuple:
+    """Fast static pre-qualification. Returns (ok, reason)."""
+    st = (sec_type or "").strip().upper()
+    ln = (long_name or "").strip()
+    px = (primary_exchange or "").strip().upper()
+
+    if st and st != "STK":
+        return False, "non_common"
+
+    if ln:
+        for rx, reason in _RE_BAD_NAME:
+            if rx.search(ln):
+                return False, reason
+
+    if px and px not in _ALLOWED_PRIMARY_EXCHANGES:
+        return False, "bad_exchange"
+
+    return True, "ok"
+
+
+def _safe_qualify_contract(ib, symbol: str, valid_contracts: dict) -> tuple:
+    """Qualify contract with IB and run static meta-filter on details.
+
+    Returns (ok, contract_or_None, reason_str).
+    Separates broker faults from legitimate rejections.
+    """
+    if symbol in valid_contracts:
+        _funnel.contract_ok += 1
+        return True, valid_contracts[symbol], "cached"
+
+    # Universe gate: reject known-bad tickers before any IBKR traffic
+    gate_ok, gate_reason = _universe_gate(symbol)
+    if not gate_ok:
+        _funnel.bump_gate_reject(gate_reason)
+        _record_verdict(symbol, gate_reason)
+        return False, None, f"gate:{gate_reason}"
+
+    # Verdict cache: skip symbols with known-bad or unstable verdicts
+    v_tier, v_reason = _check_verdict(symbol)
+    if v_tier in ("hard_deny", "soft_deny", "broker_unstable"):
+        _funnel.quarantined += 1
+        _funnel.bump_static_reject(v_reason or "contract_invalid")
+        return False, None, f"verdict:{v_tier}:{v_reason}"
+
+    # Degraded-mode guard: skip non-cached qualification while broker is unstable
+    if _broker_sentinel.degraded:
+        _funnel.broker_faults += 1
+        return False, None, "broker_degraded"
+
+    try:
+        c = _make_ib_contract(symbol)
+        qualified = ib.qualifyContracts(c)
+        if not qualified:
+            _funnel.contract_rejected += 1
+            _funnel.bump_static_reject("contract_invalid")
+            _record_verdict(symbol, "contract_invalid")
+            return False, None, "contract_invalid"
+    except Exception as e:
+        msg = str(e)
+        fault_type = _broker_sentinel.record(msg)
+        _funnel.broker_faults += 1
+        return False, None, f"broker_fault:{fault_type}"
+
+    # secType check
+    if c.secType != "STK":
+        _funnel.contract_rejected += 1
+        _funnel.bump_static_reject("non_common")
+        _record_verdict(symbol, "non_common")
+        return False, None, f"secType={c.secType}"
+
+    # Fetch contract details for longName / exchange filtering
+    try:
+        details = ib.reqContractDetails(c)
+        if details:
+            cd = details[0]
+            ln = (cd.longName or "").strip()
+            px = (getattr(cd.contract, "primaryExchange", "") or "").strip()
+            ok, reason = _fast_qualify_symbol_meta(
+                symbol=symbol, long_name=ln, primary_exchange=px,
+            )
+            if not ok:
+                _funnel.contract_rejected += 1
+                _funnel.bump_static_reject(reason)
+                _record_verdict(symbol, reason)
+                return False, None, f"longName/{reason}: {ln}"
+    except Exception as e:
+        msg = str(e)
+        fault_type = _broker_sentinel.record(msg)
+        _funnel.broker_faults += 1
+        return False, None, f"broker_fault:{fault_type}"
+
+    valid_contracts[symbol] = c
+    _funnel.contract_ok += 1
+    _record_validated(symbol)
+    return True, c, "ok"
+
+
+# ── Paper-only throughput boost controller ──────────────────────────
+_PAPER_BOOST_LOOKBACK = int(os.getenv("TL_PAPER_BOOST_LOOKBACK", "6"))
+_PAPER_BOOST_DURATION = int(os.getenv("TL_PAPER_BOOST_DURATION", "3"))
+_PAPER_BOOST_DELTA = float(os.getenv("TL_PAPER_BOOST_DELTA", "5.0"))
+
+
+class _RejectReason:
+    HYPERFILTER   = "hyperfilter"
+    REGIME        = "regime"
+    UNIFIED_SCORE = "unified_score"
+    CATALYST_LOW  = "catalyst_low"
+    INVALID_SYM   = "invalid_sym"
+    QUANT_FAIL    = "quant_fail"
+    SIZING_FAIL   = "sizing_fail"
+    NO_CANDIDATES = "no_candidates"
+    OTHER         = "other"
+    SESSION_GATE  = "session_gate"
+    ALREADY_ACTIVE = "already_active"
+
+
+class _ThroughputCounters:
+    __slots__ = (
+        "candidates_seen", "intents_emitted",
+        "hyperfilter_skipped", "regime_blocked",
+        "unified_score_skipped", "catalyst_low_skipped",
+        "invalid_sym_skipped", "quant_fail_skipped",
+        "sizing_fail_skipped", "session_gate_skipped",
+        "already_active_skipped", "other_skipped",
+        "throttled", "carry_forward",
+        "regime_reject_ctx",
+    )
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self, candidates: int = 0):
+        self.candidates_seen = candidates
+        self.intents_emitted = 0
+        self.hyperfilter_skipped = 0
+        self.regime_blocked = 0
+        self.unified_score_skipped = 0
+        self.catalyst_low_skipped = 0
+        self.invalid_sym_skipped = 0
+        self.quant_fail_skipped = 0
+        self.sizing_fail_skipped = 0
+        self.session_gate_skipped = 0
+        self.already_active_skipped = 0
+        self.other_skipped = 0
+        self.throttled = 0
+        self.carry_forward = 0
+        self.regime_reject_ctx = {}
+
+    def log_line(self) -> str:
+        _sess_ok, _sess_reason = _session_allows_new_entries()
+        _rth = is_regular_trading_hours()
+        from config.runtime import require_live_quotes, synthetic_ok
+        return (
+            f"[THROUGHPUT] seen={self.candidates_seen} "
+            f"hyper={self.hyperfilter_skipped} regime={self.regime_blocked} "
+            f"score={self.unified_score_skipped} catalyst={self.catalyst_low_skipped} "
+            f"invalid={self.invalid_sym_skipped} quant={self.quant_fail_skipped} "
+            f"sizing={self.sizing_fail_skipped} session_gate={self.session_gate_skipped} "
+            f"active={self.already_active_skipped} other={self.other_skipped} "
+            f"throttled={self.throttled} carry={self.carry_forward} "
+            f"intents={self.intents_emitted} "
+            f"top_reject={_tp_best_reject()} top_class={_tp_best_class()} "
+            f"session={'RTH' if _rth else 'AFTERHOURS'} "
+            f"entry_enabled={int(_sess_ok)} "
+            f"live_quotes_required={int(require_live_quotes)} "
+            f"synthetic_ok={int(synthetic_ok)}"
+        )
+
+
+class _PaperBoostState:
+    __slots__ = (
+        "loops_since_intent", "boost_active", "loops_remaining",
+        "near_miss_this_loop",
+    )
+
+    def __init__(self):
+        self.loops_since_intent = 0
+        self.boost_active = False
+        self.loops_remaining = 0
+        self.near_miss_this_loop = False
+
+
+_tp = _ThroughputCounters()
+_paper_boost = _PaperBoostState()
+
+
+def _paper_boost_effective_min(base_min: float) -> float:
+    """Return effective min score with boost applied. No-op when not paper."""
+    if not is_paper or not _paper_boost.boost_active:
+        return base_min
+    return max(base_min * 0.5, base_min - _PAPER_BOOST_DELTA)
+
+
+def _tp_best_reject() -> str:
+    """Return the rejection reason with the highest count this cycle."""
+    pairs = [
+        (_RejectReason.HYPERFILTER, _tp.hyperfilter_skipped),
+        (_RejectReason.REGIME, _tp.regime_blocked),
+        (_RejectReason.UNIFIED_SCORE, _tp.unified_score_skipped),
+        (_RejectReason.CATALYST_LOW, _tp.catalyst_low_skipped),
+        (_RejectReason.INVALID_SYM, _tp.invalid_sym_skipped),
+        (_RejectReason.QUANT_FAIL, _tp.quant_fail_skipped),
+        (_RejectReason.SIZING_FAIL, _tp.sizing_fail_skipped),
+        (_RejectReason.SESSION_GATE, _tp.session_gate_skipped),
+        (_RejectReason.ALREADY_ACTIVE, _tp.already_active_skipped),
+        (_RejectReason.OTHER, _tp.other_skipped),
+        ("throttled", _tp.throttled),
+    ]
+    best = max(pairs, key=lambda x: x[1])
+    return best[0] if best[1] > 0 else _RejectReason.NO_CANDIDATES
+
+
+# ── Reject classification (strategy / data / operational) ────────────
+
+_REJECT_CLASS = {
+    _RejectReason.HYPERFILTER:    "strategy",
+    _RejectReason.REGIME:         "strategy",
+    _RejectReason.UNIFIED_SCORE:  "strategy",
+    _RejectReason.CATALYST_LOW:   "strategy",
+    _RejectReason.INVALID_SYM:    "data",
+    _RejectReason.QUANT_FAIL:     "data",
+    _RejectReason.SIZING_FAIL:    "data",
+    _RejectReason.SESSION_GATE:   "operational",
+    _RejectReason.ALREADY_ACTIVE: "operational",
+    _RejectReason.OTHER:          "operational",
+    "throttled":                  "operational",
+}
+
+
+def _tp_best_class() -> str:
+    """Return the reject class (strategy/data/operational) with the most rejects."""
+    class_totals = {"strategy": 0, "data": 0, "operational": 0}
+    class_totals["strategy"] = (
+        _tp.hyperfilter_skipped + _tp.regime_blocked
+        + _tp.unified_score_skipped + _tp.catalyst_low_skipped
+    )
+    class_totals["data"] = (
+        _tp.invalid_sym_skipped + _tp.quant_fail_skipped
+        + _tp.sizing_fail_skipped
+    )
+    class_totals["operational"] = (
+        _tp.session_gate_skipped + _tp.already_active_skipped
+        + _tp.other_skipped + _tp.throttled
+    )
+    best = max(class_totals.items(), key=lambda x: x[1])
+    return best[0] if best[1] > 0 else "none"
+
+
+# ── Session executability check (pre-risk gate) ──────────────────────
+
+def _session_allows_new_entries() -> tuple:
+    """Return (allowed: bool, reason: str) for new entry intents.
+
+    Checks market hours and AH configuration so the signal arm
+    skips emitting intents that the risk arm would certainly reject.
+    Manages exits are unaffected.
+    """
+    rth = is_regular_trading_hours()
+    if rth:
+        return True, "rth"
+    from config.runtime import allow_extended, ah_entry_enabled, require_live_quotes, synthetic_ok
+    if not allow_extended:
+        return False, "outside_market_hours"
+    if not ah_entry_enabled:
+        return False, "ah_entry_disabled"
+    if require_live_quotes and not synthetic_ok:
+        return False, "require_live_quotes_no_synthetic"
+    return True, "extended_hours_enabled"
+
+
+def _ledger_log_line() -> str:
+    """Full-pipeline conservation ledger: every candidate accounted once.
+
+    raw = gate_rej + dedup + quarantined + static_rej + contract_rej
+          + broker_faults + (regime + hyper + score + catalyst_low
+          + invalid + quant + sizing + session_gate + active
+          + other + throttled + carry)
+          + intents
+    """
+    upstream = (
+        _funnel.gate_rejected + _funnel.deduped + _funnel.quarantined
+        + _funnel.static_rejected + _funnel.contract_rejected
+        + _funnel.broker_faults
+    )
+    downstream = (
+        _tp.regime_blocked + _tp.hyperfilter_skipped
+        + _tp.unified_score_skipped + _tp.catalyst_low_skipped
+        + _tp.invalid_sym_skipped + _tp.quant_fail_skipped
+        + _tp.sizing_fail_skipped + _tp.session_gate_skipped
+        + _tp.already_active_skipped + _tp.other_skipped
+        + _tp.throttled + _tp.carry_forward
+    )
+    accounted = upstream + downstream + _tp.intents_emitted
+    leak = _funnel.scan_raw - accounted if _funnel.scan_raw > 0 else 0
+    return (
+        f"[LEDGER] raw={_funnel.scan_raw} "
+        f"gate={_funnel.gate_rejected} dedup={_funnel.deduped} "
+        f"quar={_funnel.quarantined} "
+        f"static={_funnel.static_rejected} contract={_funnel.contract_rejected} "
+        f"broker={_funnel.broker_faults} "
+        f"regime={_tp.regime_blocked} hyper={_tp.hyperfilter_skipped} "
+        f"score={_tp.unified_score_skipped} "
+        f"sizing={_tp.sizing_fail_skipped} session_gate={_tp.session_gate_skipped} "
+        f"active={_tp.already_active_skipped} "
+        f"throttled={_tp.throttled} carry={_tp.carry_forward} "
+        f"intents={_tp.intents_emitted} "
+        f"leak={leak}"
+    )
+
+
+def _tp_reconcile(regime_str: str) -> None:
+    """Reconcile candidate-loop funnel: sum(skip buckets) + intents must equal seen.
+
+    Logs ERROR on mismatch, prints regime-context summary for CHOP/PANIC.
+    """
+    handled = (
+        _tp.invalid_sym_skipped + _tp.already_active_skipped
+        + _tp.hyperfilter_skipped + _tp.regime_blocked
+        + _tp.unified_score_skipped + _tp.catalyst_low_skipped
+        + _tp.quant_fail_skipped + _tp.sizing_fail_skipped
+        + _tp.session_gate_skipped + _tp.other_skipped
+        + _tp.throttled + _tp.carry_forward
+        + _tp.intents_emitted
+    )
+    if handled != _tp.candidates_seen:
+        delta = _tp.candidates_seen - handled
+        log.error(
+            "[FUNNEL_MISMATCH] handled=%d seen=%d delta=%d "
+            "invalid=%d active=%d hyper=%d regime=%d score=%d cat=%d "
+            "quant=%d sizing=%d session_gate=%d other=%d "
+            "throttled=%d carry=%d intents=%d",
+            handled, _tp.candidates_seen, delta,
+            _tp.invalid_sym_skipped, _tp.already_active_skipped,
+            _tp.hyperfilter_skipped, _tp.regime_blocked,
+            _tp.unified_score_skipped, _tp.catalyst_low_skipped,
+            _tp.quant_fail_skipped, _tp.sizing_fail_skipped,
+            _tp.session_gate_skipped, _tp.other_skipped,
+            _tp.throttled, _tp.carry_forward, _tp.intents_emitted,
+        )
+        print(
+            f"[ERROR] FUNNEL_MISMATCH handled={handled} seen={_tp.candidates_seen} delta={delta}"
+        )
+
+    # ── Regime diagnostics (Task 6) ──────────────────────────────
+    if regime_str in ("CHOP", "CHOPRANGE", "PANIC", "RED"):
+        _strategy_rej = (
+            _tp.hyperfilter_skipped + _tp.unified_score_skipped
+            + _tp.catalyst_low_skipped + _tp.regime_blocked
+        )
+        if _strategy_rej > 0 or _tp.regime_reject_ctx:
+            ctx_items = sorted(
+                _tp.regime_reject_ctx.items(), key=lambda x: -x[1]
+            )
+            top_ctx = ctx_items[0] if ctx_items else ("none", 0)
+            print(
+                f"[REGIME_DIAG] regime={regime_str} "
+                f"regime_rejects={_strategy_rej} "
+                f"top_regime_context={top_ctx[0]}({top_ctx[1]}) "
+                f"breakdown: hyper={_tp.hyperfilter_skipped} "
+                f"score={_tp.unified_score_skipped} "
+                f"cat={_tp.catalyst_low_skipped} "
+                f"regime_gate={_tp.regime_blocked} "
+                f"session_gate={_tp.session_gate_skipped}"
+            )
+
+
+def _paper_boost_tick() -> None:
+    """Called once per evaluation cycle in paper mode. Updates boost state."""
+    st = _paper_boost
+
+    if _tp.intents_emitted > 0:
+        st.loops_since_intent = 0
+    else:
+        st.loops_since_intent += 1
+
+    # Decrement active boost
+    if st.boost_active:
+        st.loops_remaining -= 1
+        if st.loops_remaining <= 0:
+            st.boost_active = False
+            st.loops_remaining = 0
+
+    # Check activation condition
+    if (not st.boost_active
+            and st.loops_since_intent >= _PAPER_BOOST_LOOKBACK
+            and st.near_miss_this_loop):
+        st.boost_active = True
+        st.loops_remaining = _PAPER_BOOST_DURATION
+        print(
+            f"PAPER_THROUGHPUT_BOOST applied: base_min={BASE_MIN_UNIFIED_SCORE:.0f} "
+            f"eff_min={BASE_MIN_UNIFIED_SCORE - _PAPER_BOOST_DELTA:.0f} "
+            f"loops={_PAPER_BOOST_DURATION} no_intents_for={st.loops_since_intent}"
+        )
+
+    # Status log every cycle
+    print(
+        f"PAPER_THROUGHPUT status: active={'1' if st.boost_active else '0'} "
+        f"loops_left={st.loops_remaining} "
+        f"base_min={BASE_MIN_UNIFIED_SCORE:.0f} "
+        f"eff_min={_paper_boost_effective_min(BASE_MIN_UNIFIED_SCORE):.0f} "
+        f"top_reject={_tp_best_reject()}"
+    )
+
 
 # ── Session Event Tracker ─────────────────────────────────────────
 
@@ -526,6 +1379,18 @@ def connect_ib() -> IB:
 
     orig_error = ib.wrapper.error
     def quiet_error(reqId, errorCode, errorString, advancedOrderRejectJson=""):
+        if errorCode in (1100, 1101, 1102):
+            st = scanner_session_state()
+            pending_scanner_ids = list(st.pending_scanners.keys())
+            for pending_req_id in pending_scanner_ids:
+                try:
+                    ib.client.cancelScannerSubscription(pending_req_id)
+                except Exception:
+                    pass
+            scanner_reset_generation(f"ib_error_{errorCode}")
+            scanner_mark_restart(f"ib_error_{errorCode}")
+            setattr(ib, "_scanner_restart_required", True)
+            print(f"[SCANNER] connectivity_event code={errorCode} reqId={reqId} restart_scheduled=1")
         if errorCode in (162, 10089, 10168):
             return
         if errorCode == 200 and "No security definition" in errorString:
@@ -533,7 +1398,94 @@ def connect_ib() -> IB:
         return orig_error(reqId, errorCode, errorString, advancedOrderRejectJson)
     ib.wrapper.error = quiet_error
 
+    orig_start_req = ib.wrapper.startReq
+    def safe_start_req(reqId, *args, **kwargs):
+        result = orig_start_req(reqId, *args, **kwargs)
+        if isinstance(reqId, int) and reqId > 0:
+            scanner_note_request(reqId, "contract_details")
+        return result
+    ib.wrapper.startReq = safe_start_req
+
+    orig_contract_details = ib.wrapper.contractDetails
+    def safe_contract_details(reqId, contractDetails):
+        if not scanner_session_state().pending_contract_details.get(reqId):
+            scanner_note_stale_callback_ignored("contractDetails", reqId)
+            return
+        if not scanner_session_state().pending_contract_details[reqId].generation_id == scanner_session_state().generation_id:
+            scanner_note_stale_callback_ignored("contractDetails", reqId)
+            return
+        try:
+            return orig_contract_details(reqId, contractDetails)
+        except KeyError:
+            scanner_note_stale_callback_ignored("contractDetails", reqId)
+            return
+    ib.wrapper.contractDetails = safe_contract_details
+
+    orig_contract_details_end = ib.wrapper.contractDetailsEnd
+    def safe_contract_details_end(reqId):
+        if not scanner_session_state().pending_contract_details.get(reqId):
+            scanner_note_stale_callback_ignored("contractDetailsEnd", reqId)
+            return
+        if not scanner_session_state().pending_contract_details[reqId].generation_id == scanner_session_state().generation_id:
+            scanner_note_stale_callback_ignored("contractDetailsEnd", reqId)
+            scanner_note_request_end(reqId)
+            return
+        scanner_note_request_end(reqId)
+        try:
+            return orig_contract_details_end(reqId)
+        except KeyError:
+            scanner_note_stale_callback_ignored("contractDetailsEnd", reqId)
+            return
+    ib.wrapper.contractDetailsEnd = safe_contract_details_end
+
+    orig_scanner_data = ib.wrapper.scannerData
+    def safe_scanner_data(reqId, rank, contractDetails, distance, benchmark, projection, legsStr):
+        if reqId not in scanner_session_state().pending_scanners:
+            scanner_note_request(reqId, "scanner")
+        if not scanner_session_state().pending_scanners.get(reqId):
+            scanner_note_stale_callback_ignored("scannerData", reqId)
+            return
+        if not scanner_session_state().pending_scanners[reqId].generation_id == scanner_session_state().generation_id:
+            scanner_note_stale_callback_ignored("scannerData", reqId)
+            return
+        try:
+            return orig_scanner_data(reqId, rank, contractDetails, distance, benchmark, projection, legsStr)
+        except KeyError:
+            scanner_note_stale_callback_ignored("scannerData", reqId)
+            return
+    ib.wrapper.scannerData = safe_scanner_data
+
+    orig_scanner_data_end = ib.wrapper.scannerDataEnd
+    def safe_scanner_data_end(reqId):
+        if not scanner_session_state().pending_scanners.get(reqId):
+            scanner_note_stale_callback_ignored("scannerDataEnd", reqId)
+            return
+        if not scanner_session_state().pending_scanners[reqId].generation_id == scanner_session_state().generation_id:
+            scanner_note_stale_callback_ignored("scannerDataEnd", reqId)
+            scanner_note_request_end(reqId)
+            return
+        scanner_note_request_end(reqId)
+        try:
+            return orig_scanner_data_end(reqId)
+        except KeyError:
+            scanner_note_stale_callback_ignored("scannerDataEnd", reqId)
+            return
+    ib.wrapper.scannerDataEnd = safe_scanner_data_end
+
     return ib
+
+
+def _reset_scanner_generation(ib: IB, reason: str) -> None:
+    st = scanner_session_state()
+    pending_scanner_ids = list(st.pending_scanners.keys())
+    for pending_req_id in pending_scanner_ids:
+        try:
+            ib.client.cancelScannerSubscription(pending_req_id)
+        except Exception:
+            pass
+    scanner_reset_generation(reason)
+    scanner_mark_restart(reason)
+    setattr(ib, "_scanner_restart_required", True)
 
 
 def is_valid_stock_contract(
@@ -543,56 +1495,30 @@ def is_valid_stock_contract(
 ) -> Tuple[bool, str]:
     """
     Validate that symbol is a tradeable stock (not ETF/ETN/etc).
-    
+    Uses _safe_qualify_contract + _fast_qualify_symbol_meta for
+    consistent upstream filtering with funnel accounting.
+
     Returns:
         (is_valid, reason_if_invalid)
     """
     # Blocklist takes precedence
     if symbol in STOCK_BLOCKLIST:
-        return False, f"In blocklist"
-    
+        return False, "In blocklist"
+
+    if not coarse_symbol_allowed(symbol):
+        return False, "coarse_symbol_hygiene"
+
     # Allowlist always passes
     if symbol in STOCK_ALLOWLIST:
         return True, ""
-    
-    # Qualify and check secType
-    try:
-        if valid_contracts is not None and symbol in valid_contracts:
-            c = valid_contracts[symbol]
-        else:
-            c = _contract(symbol)
-            ib.qualifyContracts(c)
-        
-        # Check secType (MUST be STK)
-        if c.secType != "STK":
-            return False, f"secType={c.secType} (not STK)"
-        
-        # Check primaryExchange
-        if c.primaryExchange and c.primaryExchange not in ALLOWED_EXCHANGES:
-            return False, f"exchange={c.primaryExchange} not allowed"
-        
-        # Fetch full contract details to check longName
-        try:
-            contract_details = ib.reqContractDetails(c)
-            if contract_details and len(contract_details) > 0:
-                long_name = (contract_details[0].longName or "").upper()
-                print(f"    [CHECK] {symbol} secType={c.secType} longName={long_name}")
-                # Enhanced ETF/product filter — word-boundary regex to avoid
-                # false positives (e.g. NETFLIX does not contain \bETF\b).
-                _ETF_PATTERN = (
-                    r"\bETF\b|\bETN\b|\bTRUST\b|\bFUND\b|\bINDEX\b|\bNOTE\b|\bNOTES\b"
-                    r"|\bSECURITIES\b|\bULTRA\b|\bPROSHARES\b|\b2X\b|\b3X\b"
-                    r"|\bLEVERAGED\b|\bINVERSE\b"
-                )
-                if re.search(_ETF_PATTERN, long_name):
-                    matched = re.search(_ETF_PATTERN, long_name).group()
-                    return False, f"longName matched '{matched}'"
-        except Exception as e:
-            print(f"    [WARN] Could not fetch details for {symbol}: {e}")
-        
-        return True, ""
-    except Exception as e:
-        return False, f"Qualification failed: {e}"
+
+    contracts = valid_contracts if valid_contracts is not None else {}
+    ok, c, reason = _safe_qualify_contract(ib, symbol, contracts)
+    if valid_contracts is not None and c is not None:
+        valid_contracts[symbol] = c
+    if not ok:
+        return False, reason
+    return True, ""
 
 
 def _contract(symbol: str) -> Stock:
@@ -889,6 +1815,14 @@ def main():
 
     print(f"\n{SYSTEM_NAME} → {HUMAN_NAME}: Live Loop (10s)")
     print(f"MODE={'PAPER' if is_paper() else 'LIVE'} BACKEND={execution_backend()} ARMED={is_armed()}\n")
+
+    log.info("scoring_system_check threshold=%.1f scorer=catalyst_scorer_v2", MIN_CATALYST_SCORE)
+
+    # ── Resolve and validate session config (single source of truth) ─
+    rcfg = get_resolved_config()
+    rcfg.log_startup_table()
+    rcfg.assert_ah_coherence()
+
     print(f"[COOLDOWN] BRACKET_COOLDOWN_SECONDS={BRACKET_COOLDOWN_SECONDS}")
     if ENABLE_BOUNCE_MODE:
         print(
@@ -1031,12 +1965,32 @@ def main():
             if not ib.isConnected():
                 print("[WARN] IB disconnected, reconnecting...")
                 try:
+                    _reset_scanner_generation(ib, "loop_disconnect")
+                except Exception:
+                    pass
+                try:
                     ib.disconnect()
                 except Exception:
                     pass
                 ib = connect_ib()
                 time.sleep(1.0)
                 continue
+
+            if getattr(ib, "_scanner_restart_required", False):
+                candidate_pool.clear()
+                cached_scan = []
+                last_scanner_scored = []
+                last_scan_ts = 0.0
+                last_scan_score_ts = 0.0
+                setattr(ib, "_scanner_restart_required", False)
+                counters = scanner_stability_counters()
+                print(
+                    "[SCANNER] restart_applied "
+                    f"generation={scanner_session_state().generation_id} "
+                    f"stale_ignored={counters['scanner_stale_callback_ignored']} "
+                    f"resets={counters['scanner_generation_resets']} "
+                    f"restarts={counters['scanner_restart_count']}"
+                )
 
             equity = get_equity(ib)
             if equity <= 0:
@@ -1143,6 +2097,7 @@ def main():
 
             # ====== BLEND SOURCES: CATALYST PRIMARY + SCANNER FALLBACK ======
             # Priority: 1) Catalyst candidates, 2) Scanner results
+            _funnel.reset(raw=0)  # accumulate raw from each source below
             scored = []
 
             # Track scanned symbols
@@ -1163,36 +2118,44 @@ def main():
                     ranked_view = catalyst_ranking
                 
                 for opp in ranked_view[:CATALYST_TOP_N]:
+                    _funnel.scan_raw += 1
+                    _source_tracker.record_seen("catalyst")
                     if opp.symbol in invalid_symbols:
+                        _funnel.deduped += 1
+                        _source_tracker.record_rejected("catalyst")
                         continue
-                    if opp.symbol in valid_contracts:
-                        c = valid_contracts[opp.symbol]
-                        c.catalyst_score = opp.combined_score
-                        catalyst_contracts.append(c)
+                    # Universe gate: reject known-bad tickers pre-IBKR
+                    gate_ok, gate_reason = _universe_gate(opp.symbol)
+                    if not gate_ok:
+                        invalid_symbols.add(opp.symbol)
+                        _funnel.bump_gate_reject(gate_reason)
+                        _record_verdict(opp.symbol, gate_reason)
+                        _source_tracker.record_rejected("catalyst")
+                        if opp.symbol not in invalid_symbols_logged:
+                            print(f"  [CATALYST REJECTED] {opp.symbol}: gate:{gate_reason}")
+                            invalid_symbols_logged.add(opp.symbol)
                         continue
-                    try:
-                        c = _make_ib_contract(opp.symbol)
-                        # Try to qualify - this validates the symbol exists with IB
-                        qualified = ib.qualifyContracts(c)
-                        
-                        if qualified:
-                            # Valid contract - use it
-                            c.catalyst_score = opp.combined_score
-                            catalyst_contracts.append(c)
-                            valid_contracts[opp.symbol] = c
-                        else:
-                            # Failed validation
+                    if not coarse_symbol_allowed(opp.symbol):
+                        invalid_symbols.add(opp.symbol)
+                        _funnel.bump_gate_reject("non_common")
+                        _source_tracker.record_rejected("catalyst")
+                        if opp.symbol not in invalid_symbols_logged:
+                            print(f"  [CATALYST REJECTED] {opp.symbol}: coarse_symbol_hygiene")
+                            invalid_symbols_logged.add(opp.symbol)
+                        continue
+                    _funnel.static_qualified += 1
+                    ok, c, cd_reason = _safe_qualify_contract(ib, opp.symbol, valid_contracts)
+                    if not ok:
+                        _source_tracker.record_rejected("catalyst")
+                        if cd_reason != "broker_fault":
                             invalid_symbols.add(opp.symbol)
                             if opp.symbol not in invalid_symbols_logged:
-                                print(f"  [CATALYST REJECTED] {opp.symbol}: invalid contract")
+                                print(f"  [CATALYST REJECTED] {opp.symbol}: {cd_reason}")
                                 invalid_symbols_logged.add(opp.symbol)
-                    except Exception as e:
-                        # Contract lookup failed
-                        invalid_symbols.add(opp.symbol)
-                        if opp.symbol not in invalid_symbols_logged:
-                            reason = str(e).strip() or "qualification failed"
-                            print(f"  [CATALYST REJECTED] {opp.symbol}: {reason}")
-                            invalid_symbols_logged.add(opp.symbol)
+                        continue
+                    _source_tracker.record_accepted("catalyst")
+                    c.catalyst_score = opp.combined_score
+                    catalyst_contracts.append(c)
                 
                 scored.extend(catalyst_contracts)
                 if catalyst_refreshed:
@@ -1201,11 +2164,13 @@ def main():
                     catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
             
             # Scanner supplement: score the current batch from the pool
-            # Only rescore when we have a fresh batch AND the interval has elapsed.
+            # Scanner scores are used for DIAGNOSTICS ONLY — they do not bypass
+            # the canonical catalyst_score threshold.  Scanner candidates that
+            # also appear in catalyst_ranking already have a composite_score.
             if scan_batch and (now - last_scan_score_ts) >= SCANNER_SCORE_INTERVAL_SECONDS:
                 last_scanner_scored = score_scan_results(ib, scan_batch, top_n=TRADE_TOP_N)
                 last_scan_score_ts = now
-                print(f"[SCAN] scored {len(scan_batch)} batch -> {len(last_scanner_scored)} passed")
+                print(f"[SCAN] scored {len(scan_batch)} batch -> {len(last_scanner_scored)} passed (diagnostic only)")
 
             scanner_scored = last_scanner_scored
             if scanner_scored:
@@ -1219,8 +2184,29 @@ def main():
             catalyst_syms = set(s.symbol for s in scored)
             scanner_only = [s for s in scanner_ranked_view if s.symbol not in catalyst_syms]
 
+            # Gate: only promote scanner candidates with a catalyst_score that
+            # meets the minimum threshold.  Raw scanner scores (momentum-based)
+            # are not comparable to the 0-100 catalyst composite scale.
             scanner_slots = max(0, TRADE_TOP_N - len(scored))
-            scanner_added = scanner_only[:scanner_slots]
+            scanner_promoted = []
+            for sa in scanner_only[:scanner_slots]:
+                sa_cat = getattr(sa, "catalyst_score", None) or 0.0
+                if sa_cat >= MIN_CATALYST_SCORE:
+                    scanner_promoted.append(sa)
+                else:
+                    # Log for diagnostics — this candidate lacks a canonical score
+                    log.debug(
+                        "scanner_candidate_no_catalyst sym=%s raw_score=%.2f",
+                        sa.symbol, getattr(sa, "score", 0.0),
+                    )
+            scanner_added = scanner_promoted
+            _funnel.scan_raw += len(scanner_added)
+            _funnel.static_qualified += len(scanner_added)
+            _funnel.contract_ok += len(scanner_added)
+            for sa in scanner_added:
+                _sa_src = getattr(sa, "source", None) or "scanner"
+                _source_tracker.record_seen(_sa_src)
+                _source_tracker.record_accepted(_sa_src)
             scored.extend(scanner_added)
 
             if scanner_added:
@@ -1449,22 +2435,53 @@ def main():
                     f"equity={equity:,.0f} risk={open_risk_pct:.3f}(filled={filled_risk_pct:.3f}+pending={pending_risk_pct:.3f}) active={len(active)} "
                     f"breadth={breadth_pct_display} {engine_status}"
                 )
+                counters = scanner_stability_counters()
+                print(
+                    "[SCANNER] counters "
+                    f"stale_ignored={counters['scanner_stale_callback_ignored']} "
+                    f"generation_resets={counters['scanner_generation_resets']} "
+                    f"restart_count={counters['scanner_restart_count']}"
+                )
+                print(_funnel.log_line())
+                print(_broker_sentinel.log_line())
+                print(_source_tracker.log_line())
+                if is_paper:
+                    print(_tp.log_line())
+                print(_ledger_log_line())
+
+                # Reset per-cycle throughput counters
+                _tp.reset(candidates=len(scored))
+                if is_paper:
+                    _paper_boost.near_miss_this_loop = False
 
                 brackets_submitted_this_loop = 0  # Throttle: max 1 per loop
                 
+                # ====== SESSION GATE: skip new entry intents when session blocks ======
+                _session_ok, _session_reason = _session_allows_new_entries()
+                if not _session_ok:
+                    print(f"[SESSION_GATE] new entries blocked: {_session_reason}")
+                    _tp.session_gate_skipped = len(scored)
+
                 # ====== REGIME GATE: RED → skip new entries ======
                 if regime.regime == "RED":
                     print(f"[REGIME] RED — no new entries. Reasons: {', '.join(regime.reasons)}")
+                    _tp.regime_blocked = len(scored)
 
-                for cand in scored:
+                for _ci, cand in enumerate(scored):
                     sym = cand.symbol
                     tracker.candidates_checked += 1
 
+                    # Session gate: no entry intents when session certainly rejects
+                    if not _session_ok:
+                        break  # already counted in session_gate_skipped
+
                     if sym in invalid_symbols:
+                        _tp.invalid_sym_skipped += 1
                         continue
 
                     # Skip if already active
                     if sym in active:
+                        _tp.already_active_skipped += 1
                         continue
 
                     # Skip recently hyper-rejected symbols to avoid re-check spam every loop
@@ -1479,20 +2496,26 @@ def main():
                         recheck_seconds = HYPER_RECHECK_PRICECAP_SECONDS
 
                     if (now - last_hs_reject) < recheck_seconds:
+                        _tp.hyperfilter_skipped += 1
+                        _tp.regime_reject_ctx[f"{regime.regime}:hyperfilter_cooldown"] = _tp.regime_reject_ctx.get(f"{regime.regime}:hyperfilter_cooldown", 0) + 1
                         continue
 
                     # Regime RED: block new entries entirely
                     if regime.regime == "RED":
+                        _tp.carry_forward += len(scored) - _ci - 1
                         break
 
                     # Skip if max positions reached
                     if len(active) >= max_concurrent_positions:
                         print("Max concurrent positions reached.")
+                        _tp.carry_forward += len(scored) - _ci - 1
                         break
 
                     # ====== SCORE THRESHOLD CHECK (CATALYST ONLY) ======
                     cat_score = getattr(cand, 'catalyst_score', None) or 0.0
                     if cat_score < MIN_CATALYST_SCORE:
+                        _tp.catalyst_low_skipped += 1
+                        _tp.regime_reject_ctx[f"{regime.regime}:catalyst_low"] = _tp.regime_reject_ctx.get(f"{regime.regime}:catalyst_low", 0) + 1
                         continue
 
                     # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
@@ -1502,6 +2525,7 @@ def main():
                             print(f"[REJECT] {sym}: not tradeable ({reason})")
                             invalid_symbols_logged.add(sym)
                         invalid_symbols.add(sym)
+                        _tp.invalid_sym_skipped += 1
                         continue
 
                     # ====== QUANT VERIFICATION (Phase 2) ======
@@ -1509,10 +2533,12 @@ def main():
                         qm = compute_candidate_metrics(ib, sym, spy_mom_30m=_spy_mom_30m)
                     except Exception as e:
                         print(f"[SKIP] {sym}: quant metrics failed ({e})")
+                        _tp.quant_fail_skipped += 1
                         continue
 
                     if not qm.ok:
                         print(f"[SKIP] {sym}: {qm.error}")
+                        _tp.quant_fail_skipped += 1
                         continue
 
                     dist_analyzer.record_checked(sym, cat_score, qm)
@@ -1523,7 +2549,7 @@ def main():
                         PRICE_MAX=CFG_PRICE_MAX,
                         MIN_ATR_PCT=MIN_ATR_PCT,
                         MIN_ADV20_DOLLARS=MIN_ADV20_DOLLARS,
-                        MIN_VOLUME_ACCEL=MIN_VOLUME_ACCEL,
+                        MIN_VOLUME_ACCEL=(PAPER_MIN_VOLUME_ACCEL if is_paper else MIN_VOLUME_ACCEL),
                         MIN_RS_VS_SPY=MIN_RS_VS_SPY,
                         REQUIRE_ABOVE_VWAP=True,
                         PRICE_MAX_ALLOWLIST=PRICE_MAX_ALLOWLIST,
@@ -1598,6 +2624,8 @@ def main():
                         if bounce_reason:
                             tracker.bounce_rejections.append({"symbol": sym, "reason": bounce_reason})
                             print(f"[BOUNCE_FILTER] {sym}: {bounce_reason}")
+                        _tp.hyperfilter_skipped += 1
+                        _tp.regime_reject_ctx[f"{regime.regime}:hyperfilter_{gate_tag.lower()}"] = _tp.regime_reject_ctx.get(f"{regime.regime}:hyperfilter_{gate_tag.lower()}", 0) + 1
                         continue
                     last_hyper_reject_ts.pop(sym, None)
                     last_hyper_reject_reason.pop(sym, None)
@@ -1610,6 +2638,17 @@ def main():
                         required_unified = BOUNCE_MIN_UNIFIED_SCORE
                     else:
                         required_unified = CONVICTION_MIN_UNIFIED_SCORE if conviction_mode else BASE_MIN_UNIFIED_SCORE
+
+                    # Paper-only boost: apply after regime gate (RED already checked above)
+                    if is_paper:
+                        _base_req = required_unified
+                        required_unified = _paper_boost_effective_min(required_unified)
+                        # Near-miss: candidate within delta of base threshold
+                        if (not _paper_boost.boost_active
+                                and unified >= _base_req - _PAPER_BOOST_DELTA
+                                and unified < _base_req):
+                            _paper_boost.near_miss_this_loop = True
+
                     if unified < required_unified:
                         tracker.score_rejections.append({
                             "symbol": sym,
@@ -1619,6 +2658,8 @@ def main():
                             f"[SCORE] {sym}: unified={unified:.1f} < {required_unified:.1f} "
                             f"(mode={gate_tag} cat={cat_score:.0f} quant={qm.quant_score:.0f})"
                         )
+                        _tp.unified_score_skipped += 1
+                        _tp.regime_reject_ctx[f"{regime.regime}:unified_score_{gate_tag.lower()}"] = _tp.regime_reject_ctx.get(f"{regime.regime}:unified_score_{gate_tag.lower()}", 0) + 1
                         continue
 
                     # ---- Candidate summary ----
@@ -1663,12 +2704,14 @@ def main():
                     if atr > 0:
                         atr_cache[sym] = atr
                     if not math.isfinite(atr) or atr <= 0:
+                        _tp.sizing_fail_skipped += 1
                         continue
 
                     # ====== CALCULATE SIZING ======
                     risk_dollars = equity * risk_per_trade_pct
                     qty = int(risk_dollars // atr)
                     if qty <= 0:
+                        _tp.sizing_fail_skipped += 1
                         continue
 
                     entry = px * (1 - ENTRY_OFFSET_PCT)
@@ -1679,18 +2722,22 @@ def main():
                     # Triple-check before submission
                     if not math.isfinite(entry) or entry <= 0:
                         print(f"[VALIDATION] {sym}: entry price invalid (${entry})")
+                        _tp.sizing_fail_skipped += 1
                         continue
                     
                     if not math.isfinite(stop_loss) or stop_loss <= 0:
                         print(f"[VALIDATION] {sym}: stop loss invalid (${stop_loss})")
+                        _tp.sizing_fail_skipped += 1
                         continue
 
                     if atr <= 0:
                         print(f"[VALIDATION] {sym}: ATR invalid ({atr})")
+                        _tp.sizing_fail_skipped += 1
                         continue
                     
                     if qty <= 0:
                         print(f"[VALIDATION] {sym}: qty invalid ({qty})")
+                        _tp.sizing_fail_skipped += 1
                         continue
 
                     # ---- Log trade intent ----
@@ -1702,6 +2749,7 @@ def main():
                         "risk_pct": round(risk_per_trade_pct, 4),
                         "ts": datetime.now(timezone.utc).isoformat(),
                     })
+                    _tp.intents_emitted += 1
                     lifecycle.emit(OrderEvent.TRADE_INTENT_CREATED, sym,
                                   qty=qty, entry_price=round(entry, 2),
                                   stop_price=round(stop_loss, 2),
@@ -1718,6 +2766,7 @@ def main():
                         tracker.risk_rejected.append({"symbol": sym, "reason": "kill_switch_daily_loss"})
                         lifecycle.emit(OrderEvent.RISK_REJECTED, sym,
                                       message="kill_switch_daily_loss")
+                        _tp.throttled += 1
                         continue
                     
                     # ====== CHECK THROTTLE: COOLDOWN PER SYMBOL ======
@@ -1725,23 +2774,29 @@ def main():
                     if now - last_bracket_time < COOLDOWN_SECONDS_PER_SYMBOL:
                         cooldown_remain = COOLDOWN_SECONDS_PER_SYMBOL - (now - last_bracket_time)
                         print(f"[THROTTLE] {sym}: cooldown active ({cooldown_remain:.0f}s remaining)")
+                        _tp.throttled += 1
                         continue
 
                     # ====== CHECK THROTTLE: GLOBAL BRACKET COOLDOWN ======
                     if BRACKET_COOLDOWN_SECONDS > 0 and (now - last_bracket_attempt_ts) < BRACKET_COOLDOWN_SECONDS:
                         cooldown_remain = BRACKET_COOLDOWN_SECONDS - (now - last_bracket_attempt_ts)
                         print(f"[THROTTLE] Bracket cooldown active ({cooldown_remain:.0f}s remaining)")
+                        _tp.throttled += 1
+                        _tp.carry_forward += len(scored) - _ci - 1
                         break
                     
                     # ====== CHECK THROTTLE: MAX 1 PER LOOP ======
                     if brackets_submitted_this_loop >= MAX_NEW_BRACKETS_PER_LOOP:
                         print(f"[THROTTLE] {sym}: max {MAX_NEW_BRACKETS_PER_LOOP} bracket(s) per loop reached")
+                        _tp.throttled += 1
+                        _tp.carry_forward += len(scored) - _ci - 1
                         break
                     
                     # ====== CHECK SYMBOL LOCK: NO DUPLICATE ENTRIES ======
                     locked, lock_reason = is_symbol_locked(ib, sym, symbol_lock_ts, now, SYMBOL_COOLDOWN_SECONDS)
                     if locked:
                         print(f"[LOCK] {sym}: {lock_reason}, skipping")
+                        _tp.throttled += 1
                         continue
                     
                     # ---- Risk check passed ----
@@ -1780,6 +2835,7 @@ def main():
                         last_bracket_attempt_ts = now
                         symbol_lock_ts[sym] = now  # Lock immediately after attempt
                         brackets_submitted_this_loop += 1
+                        _tp.carry_forward += max(0, len(scored) - _ci - 1)
                         break
 
                     # ====== SUBMIT BRACKET (ARMED MODE) ======
@@ -1851,7 +2907,15 @@ def main():
                             loss_streak_penalty_remaining -= 1
 
                     # After one attempt (success or fail), do not attempt more symbols this loop
+                    _tp.carry_forward += max(0, len(scored) - _ci - 1)
                     break
+
+                # Throughput: emit attribution log, reconciliation, and boost state
+                _tp_reconcile(regime.regime)
+                if is_paper:
+                    print(_tp.log_line())
+                    _paper_boost_tick()
+                print(_ledger_log_line())
 
                 last_symbols = current_symbols
                 last_print_ts = now

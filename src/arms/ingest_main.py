@@ -999,8 +999,10 @@ def _try_connect_ib():
     if not _USE_IB or _stopping:
         return None
     try:
-        from src.data.ib_market_data import connect_ib  # type: ignore[import-untyped]
-        ib = connect_ib()
+        from src.data.ib_market_data import (  # type: ignore[import-untyped]
+            HOST, PORT, CLIENT_ID, connect_ib_threadsafe,
+        )
+        ib = connect_ib_threadsafe(HOST, PORT, CLIENT_ID)
         log.info("IB connected for market data")
         return ib
     except Exception as exc:
@@ -1789,6 +1791,15 @@ def main() -> None:
         len(_valid_symbols),
         _US_SYMBOLS_PATH,
     )
+
+    # ── Resolved config: log + assert AH coherence ──────────────
+    from config.runtime import get_resolved_config as _get_rcfg
+    _rcfg = _get_rcfg()
+    _rcfg.log_startup_table()
+    try:
+        _rcfg.assert_ah_coherence()
+    except RuntimeError:
+        log.error("ingest arm: AH coherence check FAILED — continuing with degraded config")
 
     bus = get_bus(max_retries=3)
 

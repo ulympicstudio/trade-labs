@@ -1,6 +1,6 @@
 import logging
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 from ib_insync import IB, ScannerSubscription, Stock
 
@@ -14,11 +14,118 @@ log = logging.getLogger(__name__)
 class ScanResult:
     symbol: str
     rank: int
+    source: str = ""
+
+
+@dataclass
+class PendingReq:
+    req_id: int
+    generation_id: int
+    kind: str
+
+
+@dataclass
+class ScannerSessionState:
+    generation_id: int = 1
+    pending_contract_details: Dict[int, PendingReq] = field(default_factory=dict)
+    pending_scanners: Dict[int, PendingReq] = field(default_factory=dict)
+    scanner_stale_callback_ignored: int = 0
+    scanner_generation_resets: int = 0
+    scanner_restart_count: int = 0
+
+
+_SCANNER_SESSION = ScannerSessionState()
 
 
 # ---- Scanner retry config ----
 _SCANNER_MAX_RETRIES = 3
 _SCANNER_BACKOFF_BASE = 2.0  # seconds; retries wait 2, 4, 8 …
+
+
+def scanner_session_state() -> ScannerSessionState:
+    return _SCANNER_SESSION
+
+
+def scanner_note_request(req_id: int, kind: str) -> None:
+    if req_id is None or req_id < 0:
+        return
+    pending = PendingReq(req_id=req_id, generation_id=_SCANNER_SESSION.generation_id, kind=kind)
+    if kind == "scanner":
+        _SCANNER_SESSION.pending_scanners[req_id] = pending
+    else:
+        _SCANNER_SESSION.pending_contract_details[req_id] = pending
+
+
+def scanner_note_request_end(req_id: int) -> None:
+    if req_id is None:
+        return
+    _SCANNER_SESSION.pending_scanners.pop(req_id, None)
+    _SCANNER_SESSION.pending_contract_details.pop(req_id, None)
+
+
+def scanner_is_req_active(req_id: int, kind: str) -> bool:
+    if req_id is None:
+        return False
+    if kind == "scanner":
+        pending = _SCANNER_SESSION.pending_scanners.get(req_id)
+    else:
+        pending = _SCANNER_SESSION.pending_contract_details.get(req_id)
+    return bool(pending and pending.generation_id == _SCANNER_SESSION.generation_id)
+
+
+def scanner_note_stale_callback_ignored(kind: str, req_id: int) -> None:
+    _SCANNER_SESSION.scanner_stale_callback_ignored += 1
+    log.debug(
+        "scanner_stale_callback_ignored kind=%s reqId=%s generation=%s total=%s",
+        kind,
+        req_id,
+        _SCANNER_SESSION.generation_id,
+        _SCANNER_SESSION.scanner_stale_callback_ignored,
+    )
+
+
+def scanner_reset_generation(reason: str) -> None:
+    _SCANNER_SESSION.generation_id += 1
+    _SCANNER_SESSION.pending_scanners.clear()
+    _SCANNER_SESSION.pending_contract_details.clear()
+    _SCANNER_SESSION.scanner_generation_resets += 1
+    log.info(
+        "scanner_generation_resets generation=%s reason=%s total=%s",
+        _SCANNER_SESSION.generation_id,
+        reason,
+        _SCANNER_SESSION.scanner_generation_resets,
+    )
+
+
+def scanner_mark_restart(reason: str) -> None:
+    _SCANNER_SESSION.scanner_restart_count += 1
+    log.info(
+        "scanner_restart_count generation=%s reason=%s total=%s",
+        _SCANNER_SESSION.generation_id,
+        reason,
+        _SCANNER_SESSION.scanner_restart_count,
+    )
+
+
+def scanner_stability_counters() -> Dict[str, int]:
+    return {
+        "scanner_stale_callback_ignored": _SCANNER_SESSION.scanner_stale_callback_ignored,
+        "scanner_generation_resets": _SCANNER_SESSION.scanner_generation_resets,
+        "scanner_restart_count": _SCANNER_SESSION.scanner_restart_count,
+    }
+
+
+def coarse_symbol_allowed(symbol: str) -> bool:
+    s = (symbol or "").strip().upper()
+    if not s:
+        return False
+    if len(s) > 5:
+        return False
+    if any(ch in s for ch in (".", "-", "/", "^", " ")):
+        return False
+    if not s.isalnum():
+        return False
+    return True
 
 
 def _looks_like_etf(long_name: str) -> bool:
@@ -138,6 +245,11 @@ def scan_us_most_active(ib: Optional[IB] = None, limit: int = 50) -> List[ScanRe
             details = r.contractDetails
             c = details.contract
             symbol = c.symbol
+
+            if not coarse_symbol_allowed(symbol):
+                log.debug("Scanner: %s rejected (coarse symbol hygiene)", symbol)
+                filtered_count += 1
+                continue
 
             # Quick price filter using scanner's reported price
             scanner_price = getattr(r, "price", None)

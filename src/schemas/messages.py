@@ -79,6 +79,7 @@ class TradeIntent:
     symbol: str
     ts: datetime = field(default_factory=_utcnow)
     intent_id: str = field(default_factory=_new_id)
+    candidate_id: str = ""
     setup_type: str = ""          # e.g. "breakout", "mean_revert"
     direction: str = "LONG"       # "LONG" | "SHORT"
     confidence: float = 0.0       # 0.0 … 1.0
@@ -86,6 +87,19 @@ class TradeIntent:
     entry_zone_high: float = 0.0
     invalidation: float = 0.0     # price where thesis fails
     reason_codes: List[str] = field(default_factory=list)
+    # ── Sizing mode (hybrid sizing) ──
+    mode: str = "FULL"            # "FULL" | "REDUCED" | "MIN_PROBE"
+    # ── Signal-to-risk contract (enriched) ──
+    unified_score: float = 0.0    # composite score from signal scoring
+    regime: str = ""              # regime at emission time
+    session: str = ""             # session at emission time
+    sector_heat: str = ""         # sector state: LEADING / NEUTRAL / WEAK
+    rotation_state: str = ""      # industry rotation state
+    risk_slot: str = ""           # precomputed risk bucket + cap_mult hint
+    regime_score_mult: float = 1.0   # regime-derived score multiplier
+    regime_cap_mult: float = 1.0     # regime-derived position cap multiplier
+    regime_max_pos: int = 5          # regime-derived max simultaneous positions
+    spread_bps: float = 0.0          # bid-ask spread in basis points
 
 
 # ── Off-hours candidates ─────────────────────────────────────────────
@@ -233,6 +247,7 @@ class OrderBlueprint:
     escalation: bool = False
     source: str = ""              # "open_plan" | "trade_intent"
     # ── Sector Intelligence ──
+    session: str = ""             # session at blueprint creation: OFF_HOURS | PREMARKET | RTH
     sector: str = ""              # e.g. "Technology"
     industry: str = ""            # e.g. "Semiconductors"
     sector_state: str = ""        # LEADING / NEUTRAL / WEAK
@@ -247,6 +262,8 @@ class OrderPlan:
     symbol: str
     ts: datetime = field(default_factory=_utcnow)
     intent_id: str = ""
+    candidate_id: str = ""
+    direction: str = "BUY"        # "BUY" | "SELL"
     qty: int = 0
     entry_type: str = "LMT"      # "LMT" | "MKT" | "STP_LMT"
     limit_prices: List[float] = field(default_factory=list)
@@ -254,6 +271,7 @@ class OrderPlan:
     trail_params: Dict[str, Any] = field(default_factory=dict)
     tif: str = "DAY"             # "DAY" | "GTC" | "IOC"
     timeout_s: float = 60.0
+    mode: str = "FULL"            # "FULL" | "REDUCED" | "MIN_PROBE"
 
 
 # ── Execution events ────────────────────────────────────────────────

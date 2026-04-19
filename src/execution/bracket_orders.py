@@ -207,6 +207,8 @@ def place_trailing_stop(
             auxPrice=trail_amount,
             tif=tif,
             transmit=True,
+            eTradeOnly=False,
+            firmQuoteOnly=False,
         )
         trade = ib.placeOrder(c, trail_order)
         ib.sleep(0.5)

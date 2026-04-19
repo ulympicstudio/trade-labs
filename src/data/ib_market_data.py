@@ -1,3 +1,4 @@
+import asyncio
 from ib_insync import IB, Stock, util
 import pandas as pd
 import math
@@ -25,10 +26,18 @@ def get_history_bars(
         raise RuntimeError("No historical bars returned.")
     return df
 
-def connect_ib() -> IB:
+def connect_ib_threadsafe(host: str, port: int, client_id: int) -> IB:
+    """Thread-safe IB connect: ensures an asyncio event loop exists in this thread."""
+    from src.broker.ib_session import _ensure_event_loop
+    _ensure_event_loop()
     ib = IB()
-    ib.connect(HOST, PORT, clientId=CLIENT_ID, timeout=10)
+    ib.connect(host, port, clientId=client_id, timeout=10)
     return ib
+
+
+def connect_ib() -> IB:
+    """Backward-compatible wrapper — delegates to connect_ib_threadsafe."""
+    return connect_ib_threadsafe(HOST, PORT, CLIENT_ID)
 
 # Symbols that need an explicit primaryExch for IBKR contract resolution.
 # SMART routing alone is ambiguous for these tickers.
@@ -36,6 +45,8 @@ EXCHANGE_OVERRIDES: dict[str, str] = {
     "SQ":    "NYSE",
     "BRK.B": "NYSE",
     "BF.B":  "NYSE",
+    "HES":   "NYSE",
+    "PXD":   "NYSE",
 }
 
 

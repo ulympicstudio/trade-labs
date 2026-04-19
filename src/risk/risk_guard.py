@@ -13,6 +13,9 @@ from config.risk_limits import (
 )
 from src.risk.session_gate import check_session_gate, GateResult
 from src.signals.regime import get_regime, RegimeState, PANIC
+from src.market.session import get_us_equity_session
+import config.runtime as _rtcfg
+from src.policies.session_policy import SessionContext, QuoteContext, VenuePolicy, can_emit_entry
 
 _log = logging.getLogger(__name__)
 
@@ -110,6 +113,28 @@ def approve_new_trade(
         "approve_new_trade open_risk=$%.2f proposed=$%.2f cap=$%.2f pass=%s",
         open_risk_usd, proposed_trade_risk_usd, max_open, would_pass,
     )
+
+    _session_decision = can_emit_entry(
+        SessionContext(session=get_us_equity_session()),
+        QuoteContext(quote_present=True, quote_age_s=0.0, is_synthetic=False),
+        VenuePolicy(
+            allow_entries_rth=True,
+            allow_entries_pre=(
+                bool(getattr(_rtcfg, "allow_extended", False))
+                and bool(getattr(_rtcfg, "ah_entry_enabled", False))
+            ),
+            allow_entries_afterhours=(
+                bool(getattr(_rtcfg, "allow_extended", False))
+                and bool(getattr(_rtcfg, "ah_entry_enabled", False))
+            ),
+            manage_enabled_when_entry_blocked=True,
+            require_live_quotes=bool(getattr(_rtcfg, "require_live_quotes", True)),
+            synthetic_ok=bool(getattr(_rtcfg, "synthetic_ok", False)),
+            quote_stale_after_s=5.0,
+        ),
+    )
+    if not _session_decision.entry_enabled:
+        return RiskStatus(False, f"Session gate blocked: {_session_decision.block_reason}", quality_score=0.0)
 
     # Session gate check
     gate = check_session_gate()

@@ -21,9 +21,30 @@ from typing import Any, Optional
 
 from src.config.settings import settings
 from src.monitoring.logger import get_logger
-from src.bus.topics import ORDER_PLAN_APPROVED, ORDER_EVENT, ORDER_BLUEPRINT, HEARTBEAT
-from src.schemas.messages import OrderPlan, OrderEvent, OrderBlueprint, Heartbeat
+from src.bus.topics import (
+    ORDER_PLAN_APPROVED,
+    ORDER_EVENT,
+    ORDER_BLUEPRINT,
+    HEARTBEAT,
+    NEWS_EVENT,
+    MARKET_SNAPSHOT,
+)
+from src.schemas.messages import (
+    OrderPlan,
+    OrderEvent,
+    OrderBlueprint,
+    Heartbeat,
+    NewsEvent,
+    MarketSnapshot,
+)
 from src.market.session import get_us_equity_session, RTH, is_test_session_forced, get_test_force_session
+import config.runtime as _rtcfg
+from src.policies.session_policy import (
+    SessionContext,
+    QuoteContext,
+    VenuePolicy,
+    can_emit_entry,
+)
 from src.risk.kill_switch import (
     record_fill as _ks_record_fill,
     record_failed_order as _ks_record_failed,
@@ -59,12 +80,25 @@ from src.analysis.self_tuning import (
     get_tuning_snapshot as _tuning_snapshot,
     TUNING_ENABLED as _TUNING_ENABLED,
 )
+from src.policies import offhours_policy as _ohp
+from src.monitoring.throughput_dashboard import throughput as _exec_throughput
+from src.monitoring.funnel_ledger import (
+    funnel_ledger,
+    FunnelEvent,
+    make_candidate_id,
+)
+from src.monitoring.reject_event_monitor import reject_monitor, RejectStage, RejectType
+from src.monitoring.funnel_probe import funnel_probe
 
 log = get_logger("execution")
+_runtime_cfg = _rtcfg.get_resolved_config()
 
-_ALLOW_EXTENDED = os.environ.get(
-    "ALLOW_EXTENDED_HOURS", "false"
-).lower() in ("1", "true", "yes")
+# ── Off-hours sandbox config ────────────────────────────────────────
+_SANDBOX_MAX_SPREAD_BPS = float(os.environ.get("TL_EXEC_SANDBOX_MAX_SPREAD_BPS", "25.0"))
+
+# Read allow_extended from the canonical config.runtime source (UTS_ALLOW_EXTENDED)
+# instead of the legacy ALLOW_EXTENDED_HOURS env var.
+from config.runtime import allow_extended as _ALLOW_EXTENDED
 
 _EXECUTION_ENABLED = os.environ.get(
     "EXECUTION_ENABLED", "false"
@@ -99,6 +133,12 @@ _ib = None           # type: Any  # ib_insync.IB | None — set via connect_brok
 _orders_processed = 0
 _blueprints_received = 0
 _lock = threading.Lock()
+_oh_staged_total = 0
+_oh_amended_total = 0
+_oh_canceled_total = 0
+_oh_transmitted_total = 0
+_oh_last_quote_synthetic: dict[str, bool] = {}
+_last_quote_age_s: dict[str, float] = {}
 
 
 def _handle_signal(signum, _frame):
@@ -110,14 +150,22 @@ def _handle_signal(signum, _frame):
 
 # ── Broker connection (lazy, optional) ───────────────────────────────
 
-def connect_broker(ib: Any) -> None:
-    """Inject a live ``ib_insync.IB`` connection for real order routing.
+def connect_broker(ib: Any = None) -> None:
+    """Inject or create a live ``ib_insync.IB`` connection for order routing.
 
+    If *ib* is provided, use it directly (legacy path).  Otherwise, create
+    a dedicated per-arm connection via ``connect_ib_for_arm("execution")``.
     If never called, orders are routed through the SIM backend.
     """
     global _ib
-    _ib = ib
-    log.info("Broker connection injected (IB)")
+    if ib is not None:
+        _ib = ib
+        log.info("Broker connection injected (IB)")
+        return
+
+    from src.broker.ib_session import connect_ib_for_arm
+    _ib = connect_ib_for_arm("execution")
+    log.info("Broker connection created via connect_ib_for_arm('execution')")
 
 
 # ── Order handler ────────────────────────────────────────────────────
@@ -134,33 +182,170 @@ def _on_order_plan(plan: OrderPlan) -> None:
         plan.stop_price,
     )
 
-    # ── Session gate ─────────────────────────────────────────────────
+    _candidate_id = getattr(plan, "candidate_id", "") or make_candidate_id(
+        plan.symbol,
+        "execution",
+        plan.ts.timestamp() if hasattr(plan.ts, "timestamp") else time.time(),
+    )
+    funnel_ledger.record_candidate_created(
+        candidate_id=_candidate_id,
+        symbol=plan.symbol,
+        strategy_id="execution",
+        session_label=get_us_equity_session(),
+        event_ts=time.time(),
+        notes=f"intent_id={plan.intent_id}",
+    )
+
+    # ── EXECWINDOW per-cycle log ─────────────────────────────────────
+    _plan_mode_ew = getattr(plan, "mode", "FULL")
     session = get_us_equity_session()
+    _probes_only = session not in ("REGULAR", "RTH")
+    log.info(
+        "EXECWINDOW session=%s entry_allowed=pending probes_only=%s mode=%s",
+        session, _probes_only, _plan_mode_ew,
+    )
     _test_forced = is_test_session_forced()
-    if session != RTH and not _ALLOW_EXTENDED and not _test_forced:
-        log.info(
-            "Skipping order  symbol=%s  session=%s  (not RTH, ALLOW_EXTENDED_HOURS=false)",
-            plan.symbol, session,
-        )
-        _publish_event(OrderEvent(
-            symbol=plan.symbol,
-            event_type="REJECTED",
-            status="session_gate",
-            message=f"session={session}, not RTH",
-        ))
-        _ks_record_failed()
-        return
     if _test_forced and session != RTH:
         log.info(
             "forced_session_override session_gate session=%s forced=%s symbol=%s",
             session, get_test_force_session(), plan.symbol,
         )
 
+    # ── Policy-based entry gate (shared contract) ───────────────────
+    _is_synth = _oh_last_quote_synthetic.get(plan.symbol.upper(), False)
+    _age_s = _last_quote_age_s.get(plan.symbol.upper())
+    _quote_present = bool(plan.limit_prices) or plan.stop_price > 0
+
+    _venue_policy = VenuePolicy(
+        allow_entries_rth=True,
+        allow_entries_pre=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        allow_entries_afterhours=(
+            bool(_runtime_cfg.allow_extended)
+            and bool(_runtime_cfg.ah_entry_enabled)
+        ),
+        manage_enabled_when_entry_blocked=True,
+        require_live_quotes=bool(_runtime_cfg.require_live_quotes),
+        synthetic_ok=bool(_runtime_cfg.synthetic_ok),
+        quote_stale_after_s=float(os.environ.get("TL_POLICY_MAX_QUOTE_AGE_S", "5.0")),
+    )
+
+    _session_decision = can_emit_entry(
+        SessionContext(session=session),
+        QuoteContext(
+            quote_present=_quote_present,
+            quote_age_s=_age_s,
+            is_synthetic=_is_synth,
+        ),
+        _venue_policy,
+    )
+
+    log.info(
+        "execution_session_policy symbol=%s session_label=%s mode=%s block_reason=%s "
+        "require_live_quotes=%s synthetic_ok=%s paper_ah_test=%s "
+        "entry_enabled=%s manage_enabled=%s quote_age_s=%s synthetic=%s",
+        plan.symbol,
+        _session_decision.session_label,
+        _session_decision.mode,
+        _session_decision.block_reason,
+        _session_decision.require_live_quotes,
+        _session_decision.synthetic_ok,
+        _runtime_cfg.paper_ah_test,
+        _session_decision.entry_enabled,
+        _session_decision.manage_enabled,
+        "n/a" if _age_s is None else f"{_age_s:.2f}",
+        _is_synth,
+    )
+
+    if not _session_decision.entry_enabled and not _test_forced:
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id="",
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.POLICY,
+            reject_reason_code=str(_session_decision.block_reason or "EXEC_SESSION_BLOCKED").upper(),
+            reject_message=(
+                f"session={_session_decision.session_label},"
+                f"mode={_session_decision.mode}"
+            ),
+            session_label=_session_decision.session_label,
+            strategy_id="execution",
+            ts_event=time.time(),
+            raw_context={
+                "require_live_quotes": _session_decision.require_live_quotes,
+                "synthetic_ok": _session_decision.synthetic_ok,
+            },
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=_session_decision.session_label,
+            block_reason=_session_decision.block_reason,
+            emitted_intent_id=plan.intent_id,
+            event_ts=time.time(),
+        )
+        _publish_event(OrderEvent(
+            symbol=plan.symbol,
+            event_type="REJECTED",
+            status="session_gate",
+            message=(
+                f"session={_session_decision.session_label},"
+                f"mode={_session_decision.mode},"
+                f"reason={_session_decision.block_reason}"
+            ),
+        ))
+        _ks_record_failed()
+        funnel_probe.record_execution_session_reject()
+        _fp = funnel_probe.snapshot()
+        log.info(
+            "FUNNEL_PROBE candidates_seen=%d signal_session_policy_rejects=%d execution_session_policy_rejects=%d",
+            _fp.total_candidates_seen,
+            _fp.signal_session_policy_rejects,
+            _fp.execution_session_policy_rejects,
+        )
+        _exec_throughput.record_order_submitted(plan.symbol)
+        try:
+            from src.monitoring.intent_fate import fate_tracker, ExecFate
+            fate_tracker.record_exec_verdict(plan.intent_id, plan.symbol, ExecFate.SESSION_BLOCKED.value)
+        except Exception:
+            pass
+        return
+
     # ── 1. Import adapter layer ──────────────────────────────────────
     try:
         from src.execution.adapters import plan_to_order_request, result_to_order_event
     except Exception as exc:
         err_msg = str(exc)[:200]
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id="",
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.OPERATIONAL,
+            reject_reason_code="ADAPTER_IMPORT_ERROR",
+            reject_message=err_msg,
+            session_label=session,
+            strategy_id="execution",
+            ts_event=time.time(),
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            block_reason="ADAPTER_IMPORT_ERROR",
+            emitted_intent_id=plan.intent_id,
+            notes=err_msg,
+            event_ts=time.time(),
+        )
         log.error(
             "Adapter import failed for %s — rejecting plan and continuing: %s",
             plan.symbol, err_msg,
@@ -179,6 +364,30 @@ def _on_order_plan(plan: OrderPlan) -> None:
         legacy_req = plan_to_order_request(plan)
     except Exception as exc:
         err_msg = str(exc)[:200]
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id="",
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.OPERATIONAL,
+            reject_reason_code="ADAPTER_ERROR",
+            reject_message=err_msg,
+            session_label=session,
+            strategy_id="execution",
+            ts_event=time.time(),
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            block_reason="ADAPTER_ERROR",
+            emitted_intent_id=plan.intent_id,
+            notes=err_msg,
+            event_ts=time.time(),
+        )
         log.error(
             "Failed to adapt OrderPlan → OrderRequest for %s: %s",
             plan.symbol, err_msg,
@@ -197,6 +406,30 @@ def _on_order_plan(plan: OrderPlan) -> None:
         from src.execution.orders import place_order
     except Exception as exc:
         err_msg = str(exc)[:200]
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id="",
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.OPERATIONAL,
+            reject_reason_code="ORDERS_IMPORT_ERROR",
+            reject_message=err_msg,
+            session_label=session,
+            strategy_id="execution",
+            ts_event=time.time(),
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            block_reason="ORDERS_IMPORT_ERROR",
+            emitted_intent_id=plan.intent_id,
+            notes=err_msg,
+            event_ts=time.time(),
+        )
         log.error(
             "Orders module import failed for %s — rejecting: %s",
             plan.symbol, err_msg,
@@ -214,6 +447,30 @@ def _on_order_plan(plan: OrderPlan) -> None:
         result = place_order(legacy_req, ib=_ib)
     except Exception as exc:
         err_msg = str(exc)[:200]
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id="",
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.OPERATIONAL,
+            reject_reason_code="EXECUTION_ERROR",
+            reject_message=err_msg,
+            session_label=session,
+            strategy_id="execution",
+            ts_event=time.time(),
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            block_reason="EXECUTION_ERROR",
+            emitted_intent_id=plan.intent_id,
+            notes=err_msg,
+            event_ts=time.time(),
+        )
         log.error(
             "place_order raised for %s: %s", plan.symbol, err_msg,
         )
@@ -232,6 +489,43 @@ def _on_order_plan(plan: OrderPlan) -> None:
         result.message,
         result.parent_order_id,
     )
+    if result.ok:
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_ACCEPTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            emitted_intent_id=plan.intent_id,
+            execution_order_id=str(result.parent_order_id or ""),
+            event_ts=time.time(),
+        )
+    else:
+        reject_monitor.record_reject(
+            candidate_id=_candidate_id,
+            intent_id=plan.intent_id,
+            order_id=str(result.parent_order_id or ""),
+            symbol=plan.symbol,
+            stage=RejectStage.EXECUTION,
+            reject_type=RejectType.EXECUTION,
+            reject_reason_code="BROKER_REJECT",
+            reject_message=result.message,
+            session_label=session,
+            strategy_id="execution",
+            ts_event=time.time(),
+        )
+        funnel_ledger.record(
+            event_type=FunnelEvent.EXECUTION_REJECTED,
+            candidate_id=_candidate_id,
+            symbol=plan.symbol,
+            strategy_id="execution",
+            session_label=session,
+            block_reason="BROKER_REJECT",
+            emitted_intent_id=plan.intent_id,
+            execution_order_id=str(result.parent_order_id or ""),
+            notes=result.message,
+            event_ts=time.time(),
+        )
 
     # ── 4. Convert result → OrderEvent and publish ───────────────────
     try:
@@ -320,6 +614,20 @@ def _on_order_plan(plan: OrderPlan) -> None:
     with _lock:
         _orders_processed += 1
 
+    # ── Throughput tracking ──────────────────────────────────────────
+    _exec_throughput.record_order_submitted(plan.symbol)
+    _exec_throughput.record_fill(plan.symbol, plan.qty, 0.0)
+
+    # Fate tracking: final disposition
+    try:
+        from src.monitoring.intent_fate import fate_tracker, ExecFate
+        if not _EXECUTION_ENABLED and _SIM_FRICTION:
+            fate_tracker.record_exec_verdict(plan.intent_id, plan.symbol, ExecFate.PAPER_FILL.value)
+        else:
+            fate_tracker.record_exec_verdict(plan.intent_id, plan.symbol, ExecFate.TRANSMITTED.value)
+    except Exception:
+        pass
+
 
 # ── OrderBlueprint handler ─────────────────────────────────────────
 
@@ -330,10 +638,162 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
     DRY RUN and publishes a BLUEPRINT_READY OrderEvent.
     If true, maps to IB bracket orders (paper account only).
     """
-    global _blueprints_received
+    global _blueprints_received, _oh_staged_total, _oh_amended_total, _oh_canceled_total, _oh_transmitted_total
 
     with _lock:
         _blueprints_received += 1
+
+    _bp_session_for_policy = getattr(bp, "session", "") or get_us_equity_session()
+    _bp_age = _last_quote_age_s.get(bp.symbol.upper())
+    _bp_synth = _oh_last_quote_synthetic.get(bp.symbol.upper(), False)
+    _bp_quote_present = bool(getattr(bp, "entry_ladder", None))
+    _bp_decision = can_emit_entry(
+        SessionContext(session=_bp_session_for_policy),
+        QuoteContext(
+            quote_present=_bp_quote_present,
+            quote_age_s=_bp_age,
+            is_synthetic=_bp_synth,
+        ),
+        VenuePolicy(
+            allow_entries_rth=True,
+            allow_entries_pre=(
+                bool(_runtime_cfg.allow_extended)
+                and bool(_runtime_cfg.ah_entry_enabled)
+            ),
+            allow_entries_afterhours=(
+                bool(_runtime_cfg.allow_extended)
+                and bool(_runtime_cfg.ah_entry_enabled)
+            ),
+            manage_enabled_when_entry_blocked=True,
+            require_live_quotes=bool(_runtime_cfg.require_live_quotes),
+            synthetic_ok=bool(_runtime_cfg.synthetic_ok),
+            quote_stale_after_s=float(os.environ.get("TL_POLICY_MAX_QUOTE_AGE_S", "5.0")),
+        ),
+    )
+    log.info(
+        "execution_blueprint_session_policy symbol=%s session_label=%s mode=%s block_reason=%s "
+        "require_live_quotes=%s synthetic_ok=%s paper_ah_test=%s entry_enabled=%s",
+        bp.symbol,
+        _bp_decision.session_label,
+        _bp_decision.mode,
+        _bp_decision.block_reason,
+        _bp_decision.require_live_quotes,
+        _bp_decision.synthetic_ok,
+        _runtime_cfg.paper_ah_test,
+        _bp_decision.entry_enabled,
+    )
+    if not _bp_decision.entry_enabled and not is_test_session_forced():
+        _publish_event(OrderEvent(
+            symbol=bp.symbol,
+            event_type="REJECTED",
+            status="session_gate",
+            message=(
+                f"session={_bp_decision.session_label},"
+                f"mode={_bp_decision.mode},"
+                f"reason={_bp_decision.block_reason}"
+            ),
+        ))
+        _ks_record_failed()
+        funnel_probe.record_execution_session_reject()
+        _fp = funnel_probe.snapshot()
+        log.info(
+            "FUNNEL_PROBE candidates_seen=%d signal_session_policy_rejects=%d execution_session_policy_rejects=%d",
+            _fp.total_candidates_seen,
+            _fp.signal_session_policy_rejects,
+            _fp.execution_session_policy_rejects,
+        )
+        return
+
+    # ── Off-hours policy gate ──────────────────────────────────────────
+    _bp_session = getattr(bp, "session", "")
+    if _bp_session and _bp_session != "RTH":
+        from datetime import datetime, timezone as _tz
+        _bp_age_s = (datetime.now(_tz.utc) - bp.ts).total_seconds()
+        _entry_px = bp.entry_ladder[len(bp.entry_ladder) // 2] if bp.entry_ladder else 0.0
+        _oh = _ohp.on_blueprint(
+            symbol=bp.symbol,
+            session=_bp_session,
+            source=getattr(bp, "source", ""),
+            confidence=bp.confidence,
+            entry_price=_entry_px,
+            stop_price=bp.stop_price,
+            qty=bp.qty,
+            risk_usd=bp.risk_usd,
+            spread_pct=bp.max_spread_pct,
+            quote_age_s=_bp_age_s,
+            is_paper=settings.is_paper,
+            notes=bp.notes,
+            thesis_score=bp.total_score if bp.total_score > 0 else float(bp.impact_score),
+            backend="SIM" if not _EXECUTION_ENABLED else "LIVE",
+        )
+        _oh_decision = str(_oh.get("decision", "HOLD"))
+        _oh_reason = str(_oh.get("reason", "unknown"))
+        log.info(
+            "offhours_policy decision=%s symbol=%s reason=%s session=%s",
+            _oh_decision, bp.symbol, _oh_reason, _bp_session,
+        )
+        if _oh_decision == "AMEND":
+            _oh_amended_total += 1
+            log.info(
+                "offhoursamend symbol=%s oldpx=%.2f newpx=%.2f reason=%s",
+                bp.symbol,
+                float(_oh.get("old_price", _entry_px)),
+                float(_oh.get("new_price", _entry_px)),
+                _oh_reason,
+            )
+            _publish_event(OrderEvent(
+                symbol=bp.symbol,
+                event_type="OFFHOURS_AMEND",
+                status="staged_manage",
+                message=f"reason={_oh_reason}",
+            ))
+            return
+        if _oh_decision == "CANCEL":
+            _oh_canceled_total += 1
+            log.info("offhourscancel symbol=%s reason=%s", bp.symbol, _oh_reason)
+            _publish_event(OrderEvent(
+                symbol=bp.symbol,
+                event_type="OFFHOURS_CANCEL",
+                status="staged_manage",
+                message=f"reason={_oh_reason}",
+            ))
+            return
+        if _oh_decision == "SKIP":
+            if _oh_reason == "synthetic_quote":
+                log.info("offhourstransmitblocked symbol=%s reason=synthetic_quotes", bp.symbol)
+            log.info("offhoursskip symbol=%s reason=%s", bp.symbol, _oh_reason)
+            _publish_event(OrderEvent(
+                symbol=bp.symbol,
+                event_type="OFFHOURS_SKIP",
+                status="staged_manage",
+                message=f"reason={_oh_reason}",
+            ))
+            return
+        if _oh_decision == "STAGE":
+            _oh_staged_total += 1
+            # Staged successfully; no transmit until policy flips to TRANSMIT.
+            _publish_event(OrderEvent(
+                symbol=bp.symbol,
+                event_type="OFFHOURS_STAGE",
+                status="staged_manage",
+                message=f"reason={_oh_reason}",
+            ))
+            return
+        if _oh_decision != "TRANSMIT":
+            log.info("offhoursskip symbol=%s reason=%s", bp.symbol, _oh_reason)
+            return
+
+        if _oh_last_quote_synthetic.get(bp.symbol.upper(), False):
+            log.info("offhourstransmitblocked symbol=%s reason=synthetic_quotes", bp.symbol)
+            _publish_event(OrderEvent(
+                symbol=bp.symbol,
+                event_type="OFFHOURS_SKIP",
+                status="staged_manage",
+                message="reason=synthetic_quotes",
+            ))
+            return
+
+        _oh_transmitted_total += 1
 
     if not _EXECUTION_ENABLED:
         # ── Sim friction for DRY RUN (PAPER mode) ───────────────────
@@ -596,6 +1056,162 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
         ))
 
 
+# ── Paper-mode advanced order fallback ───────────────────────────────
+
+def submit_advanced_order(ib, bp: dict) -> tuple:
+    """Stage parent + children bracket from a blueprint dict.
+
+    Builds IB-compatible order objects with proper transmit chaining.
+    The parent and stop are staged (transmit=False); the trailing stop
+    is the final child (transmit=True) so IB transmits the group atomically.
+
+    Returns (parent, stop, trail) order objects.
+    """
+    from ib_insync import LimitOrder, StopOrder, Order
+
+    _side = bp.get("side", "BUY")
+    _qty = int(bp.get("qty", 0))
+    _counter_side = "SELL" if _side == "BUY" else "BUY"
+
+    parent = LimitOrder(
+        _side,
+        _qty,
+        bp["entry"]["limit_price"],
+    )
+    parent.tif = bp["entry"].get("tif", "DAY")
+    parent.outsideRth = bp["entry"].get("outsideRth", False)
+    parent.transmit = False
+
+    stop = StopOrder(
+        _counter_side,
+        _qty,
+        bp["stop_loss"]["stop_price"],
+    )
+    stop.parentId = 0  # linked after IB assigns parent orderId
+    stop.transmit = False
+
+    trail = Order()
+    trail.action = _counter_side
+    trail.orderType = "TRAIL"
+    trail.totalQuantity = _qty
+    trail.trailingPercent = bp["trailing_stop"]["trail_percent"]
+    trail.transmit = True  # final child triggers group transmit
+
+    return parent, stop, trail
+
+
+def _on_market_snapshot(snap: MarketSnapshot) -> None:
+    """Drive off-hours staged order updates from ingest market snapshots."""
+    global _oh_amended_total, _oh_canceled_total
+    try:
+        from datetime import datetime, timezone as _tz
+
+        age_s = max(0.0, (datetime.now(_tz.utc) - snap.ts).total_seconds())
+        # Heuristic synthetic detection: flat quote with no spread/volume or invalid sides.
+        synthetic = (
+            snap.bid <= 0
+            or snap.ask <= 0
+            or (snap.volume == 0 and abs(snap.bid - snap.ask) < 1e-9 and abs(snap.last - snap.bid) < 1e-9)
+        )
+        _sym = snap.symbol.upper()
+        _oh_last_quote_synthetic[_sym] = synthetic
+        _last_quote_age_s[_sym] = age_s
+        result = _ohp.on_market_snapshot(
+            symbol=snap.symbol,
+            session=snap.session,
+            bid=snap.bid,
+            ask=snap.ask,
+            last=snap.last,
+            quote_age_s=age_s,
+            is_synthetic=synthetic,
+        )
+        decision = str(result.get("decision", "HOLD"))
+        reason = str(result.get("reason", "unknown"))
+
+        if "old_thesis" in result or "new_thesis" in result:
+            log.info(
+                "thesisdecay symbol=%s old=%.2f new=%.2f broken=%s",
+                snap.symbol,
+                float(result.get("old_thesis", 0.0)),
+                float(result.get("new_thesis", 0.0)),
+                bool(result.get("thesis_broken", False)),
+            )
+
+        if decision == "AMEND":
+            _oh_amended_total += 1
+            log.info(
+                "offhoursamend symbol=%s oldpx=%.2f newpx=%.2f reason=%s",
+                snap.symbol,
+                float(result.get("old_price", 0.0)),
+                float(result.get("new_price", 0.0)),
+                reason,
+            )
+            _publish_event(OrderEvent(
+                symbol=snap.symbol,
+                event_type="OFFHOURS_AMEND",
+                status="staged_manage",
+                message=f"reason={reason}",
+            ))
+            return
+        if decision == "CANCEL":
+            _oh_canceled_total += 1
+            log.info("offhourscancel symbol=%s reason=%s", snap.symbol, reason)
+            _publish_event(OrderEvent(
+                symbol=snap.symbol,
+                event_type="OFFHOURS_CANCEL",
+                status="staged_manage",
+                message=f"reason={reason}",
+            ))
+            return
+        if decision == "SKIP":
+            log.info("offhoursskip symbol=%s reason=%s", snap.symbol, reason)
+            _publish_event(OrderEvent(
+                symbol=snap.symbol,
+                event_type="OFFHOURS_SKIP",
+                status="staged_manage",
+                message=f"reason={reason}",
+            ))
+            return
+    except Exception as exc:
+        log.warning("offhours_snapshot_manage_err symbol=%s err=%s", getattr(snap, "symbol", ""), exc)
+
+
+def _on_news_event(news: NewsEvent) -> None:
+    """Drive thesis decay and cancel checks from ingest news deltas."""
+    global _oh_canceled_total
+    try:
+        from datetime import datetime, timezone as _tz
+
+        news_age_s = max(0.0, (datetime.now(_tz.utc) - news.ts).total_seconds())
+        result = _ohp.on_news_event(
+            symbol=news.symbol,
+            sentiment=news.sentiment,
+            impact_score=news.impact_score,
+            impact_tags=list(news.impact_tags),
+            source_provider=news.source_provider,
+            news_age_s=news_age_s,
+        )
+        log.info(
+            "thesisdecay symbol=%s old=%.2f new=%.2f broken=%s",
+            news.symbol,
+            float(result.get("old_thesis", 0.0)),
+            float(result.get("new_thesis", 0.0)),
+            bool(result.get("thesis_broken", False)),
+        )
+        if str(result.get("decision", "HOLD")) == "CANCEL":
+            _oh_canceled_total += 1
+            _news_reason = str(result.get("reason", "news"))
+            log.info("offhourscancel symbol=%s reason=%s", news.symbol, _news_reason)
+            _publish_event(OrderEvent(
+                symbol=news.symbol,
+                event_type="OFFHOURS_CANCEL",
+                status="staged_manage",
+                message=f"reason={_news_reason}",
+            ))
+    except Exception as exc:
+        log.warning("offhours_news_manage_err symbol=%s err=%s", getattr(news, "symbol", ""), exc)
+
+
 # ── Dev harness: generate synthetic fills for pipeline testing ───────
 
 _dev_harness_idx = 0
@@ -698,7 +1314,15 @@ def _connect_bus():
             return None
         bus.subscribe(ORDER_PLAN_APPROVED, _on_order_plan, msg_type=OrderPlan)
         bus.subscribe(ORDER_BLUEPRINT, _on_order_blueprint, msg_type=OrderBlueprint)
-        log.info("Subscribed to %s, %s", ORDER_PLAN_APPROVED, ORDER_BLUEPRINT)
+        bus.subscribe(MARKET_SNAPSHOT, _on_market_snapshot, msg_type=MarketSnapshot)
+        bus.subscribe(NEWS_EVENT, _on_news_event, msg_type=NewsEvent)
+        log.info(
+            "Subscribed to %s, %s, %s, %s",
+            ORDER_PLAN_APPROVED,
+            ORDER_BLUEPRINT,
+            MARKET_SNAPSHOT,
+            NEWS_EVENT,
+        )
         return bus
     except Exception:
         log.exception("Failed to initialise event bus — will retry")
@@ -734,6 +1358,15 @@ def main() -> None:
         _LIVE_TRADING_ENABLED,
         settings.heartbeat_interval_s,
     )
+
+    # ── Resolved config: log + assert AH coherence ──────────────
+    from config.runtime import get_resolved_config as _get_rcfg
+    _rcfg = _get_rcfg()
+    _rcfg.log_startup_table()
+    try:
+        _rcfg.assert_ah_coherence()
+    except RuntimeError:
+        log.error("execution arm: AH coherence check FAILED — continuing with degraded config")
 
     _bus = _connect_bus()
 
@@ -882,9 +1515,33 @@ def main() -> None:
             _attrib_hb = f"  ATTRIB[open={_attrib_open_count()}]"
         log.info("heartbeat  tick=%d  orders_processed=%d  blueprints=%d%s%s%s", tick, count, bp_count, _exit_hb, _attrib_hb, _tune_hb)
 
+        if settings.is_paper:
+            _flags = _ohp.runtime_flags()
+            _staged_now = _ohp.staged_count()
+            _synthetic_ok = (not _flags.get("require_live_quotes", True)) and (not _flags.get("cancel_on_synth", True))
+            log.info(
+                "offhoursdiag manage=%s entry=%s require_live_quotes=%s synthetic_ok=%s staged=%d amended=%d canceled=%d transmitted=%d",
+                _flags.get("manage", False),
+                _flags.get("entry", False),
+                _flags.get("require_live_quotes", True),
+                _synthetic_ok,
+                _staged_now,
+                _oh_amended_total,
+                _oh_canceled_total,
+                _oh_transmitted_total,
+            )
+
         # ── Dev harness: inject synthetic fills periodically ─────
         if _DEV_HARNESS_ENABLED and tick % max(1, _DEV_HARNESS_INTERVAL_S // settings.heartbeat_interval_s) == 0:
             _dev_harness_tick()
+
+        # Fate conservation heartbeat (every 10 ticks)
+        if tick % 10 == 0:
+            try:
+                from src.monitoring.intent_fate import fate_tracker
+                fate_tracker.log_conservation()
+            except Exception:
+                pass
 
         _stop_event.wait(settings.heartbeat_interval_s)
         if _stop_event.is_set():
