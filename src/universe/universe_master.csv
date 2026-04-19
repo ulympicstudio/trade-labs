@@ -96,3 +96,422 @@ RIVN,Rivian,Consumer Discretionary,Automotive,Electric Vehicles,XLY,CARZ,2500000
 LCID,Lucid Group,Consumer Discretionary,Automotive,Electric Vehicles,XLY,CARZ,20000000,small,2
 ENPH,Enphase Energy,Energy,Solar,Microinverters,XLE,TAN,5000000,mid,1
 FSLR,First Solar,Energy,Solar,Solar Panels,XLE,TAN,3000000,mid,1
+MMM,3M,Industrials,Industrial Conglomerates,Industrial Conglomerates,,,0,large,tier2
+AOS,A. O. Smith,Industrials,Building Products,Building Products,,,0,large,tier2
+ABT,Abbott Laboratories,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+ACN,Accenture,Information Technology,IT Consulting & Other Services,IT Consulting & Other Services,,,0,large,tier2
+AES,AES Corporation,Utilities,Independent Power Producers & Energy Traders,Independent Power Producers & Energy Traders,,,0,large,tier2
+AFL,Aflac,Financials,Life & Health Insurance,Life & Health Insurance,,,0,large,tier2
+A,Agilent Technologies,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+ABNB,Airbnb,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+AKAM,Akamai Technologies,Information Technology,Internet Services & Infrastructure,Internet Services & Infrastructure,,,0,large,tier2
+ALB,Albemarle Corporation,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+ARE,Alexandria Real Estate Equities,Real Estate,Office REITs,Office REITs,,,0,large,tier2
+ALGN,Align Technology,Health Care,Health Care Supplies,Health Care Supplies,,,0,large,tier2
+ALLE,Allegion,Industrials,Building Products,Building Products,,,0,large,tier2
+LNT,Alliant Energy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+ALL,Allstate,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+MO,Altria,Consumer Staples,Tobacco,Tobacco,,,0,large,tier2
+AMCR,Amcor,Materials,Paper & Plastic Packaging Products & Materials,Paper & Plastic Packaging Products & Materials,,,0,large,tier2
+AEE,Ameren,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+AEP,American Electric Power,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+AXP,American Express,Financials,Consumer Finance,Consumer Finance,,,0,large,tier2
+AIG,American International Group,Financials,Multi-line Insurance,Multi-line Insurance,,,0,large,tier2
+AWK,American Water Works,Utilities,Water Utilities,Water Utilities,,,0,large,tier2
+AMP,Ameriprise Financial,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+AME,Ametek,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+AMGN,Amgen,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+APH,Amphenol,Information Technology,Electronic Components,Electronic Components,,,0,large,tier2
+ADI,Analog Devices,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+AON,Aon plc,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+APA,APA Corporation,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+APO,Apollo Global Management,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+APP,AppLovin,Information Technology,Application Software,Application Software,,,0,large,tier2
+APTV,Aptiv,Consumer Discretionary,Automotive Parts & Equipment,Automotive Parts & Equipment,,,0,large,tier2
+ACGL,Arch Capital Group,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+ADM,Archer Daniels Midland,Consumer Staples,Agricultural Products & Services,Agricultural Products & Services,,,0,large,tier2
+ARES,Ares Management,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+ANET,Arista Networks,Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+AJG,Arthur J. Gallagher & Co.,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+AIZ,Assurant,Financials,Multi-line Insurance,Multi-line Insurance,,,0,large,tier2
+T,AT&T,Communication Services,Integrated Telecommunication Services,Integrated Telecommunication Services,,,0,large,tier2
+ATO,Atmos Energy,Utilities,Gas Utilities,Gas Utilities,,,0,large,tier2
+ADSK,Autodesk,Information Technology,Application Software,Application Software,,,0,large,tier2
+ADP,Automatic Data Processing,Industrials,Human Resource & Employment Services,Human Resource & Employment Services,,,0,large,tier2
+AZO,AutoZone,Consumer Discretionary,Automotive Retail,Automotive Retail,,,0,large,tier2
+AVB,AvalonBay Communities,Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+AVY,Avery Dennison,Materials,Paper & Plastic Packaging Products & Materials,Paper & Plastic Packaging Products & Materials,,,0,large,tier2
+AXON,Axon Enterprise,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+BKR,Baker Hughes,Energy,Oil & Gas Equipment & Services,Oil & Gas Equipment & Services,,,0,large,tier2
+BALL,Ball Corporation,Materials,"Metal, Glass & Plastic Containers","Metal, Glass & Plastic Containers",,,0,large,tier2
+BAX,Baxter International,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+BDX,Becton Dickinson,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+BRK.B,Berkshire Hathaway,Financials,Multi-Sector Holdings,Multi-Sector Holdings,,,0,large,tier2
+BBY,Best Buy,Consumer Discretionary,Computer & Electronics Retail,Computer & Electronics Retail,,,0,large,tier2
+TECH,Bio-Techne,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+BIIB,Biogen,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+BLK,BlackRock,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+BX,Blackstone Inc.,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+XYZ,"Block, Inc.",Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+BK,BNY Mellon,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+BKNG,Booking Holdings,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+BSX,Boston Scientific,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+BR,Broadridge Financial Solutions,Industrials,Data Processing & Outsourced Services,Data Processing & Outsourced Services,,,0,large,tier2
+BRO,Brown & Brown,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+BF.B,Brown–Forman,Consumer Staples,Distillers & Vintners,Distillers & Vintners,,,0,large,tier2
+BLDR,Builders FirstSource,Industrials,Building Products,Building Products,,,0,large,tier2
+BG,Bunge Global,Consumer Staples,Agricultural Products & Services,Agricultural Products & Services,,,0,large,tier2
+BXP,"BXP, Inc.",Real Estate,Office REITs,Office REITs,,,0,large,tier2
+CHRW,C.H. Robinson,Industrials,Air Freight & Logistics,Air Freight & Logistics,,,0,large,tier2
+CDNS,Cadence Design Systems,Information Technology,Application Software,Application Software,,,0,large,tier2
+CPT,Camden Property Trust,Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+CPB,Campbell's Company (The),Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+COF,Capital One,Financials,Consumer Finance,Consumer Finance,,,0,large,tier2
+CAH,Cardinal Health,Health Care,Health Care Distributors,Health Care Distributors,,,0,large,tier2
+CCL,Carnival,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+CARR,Carrier Global,Industrials,Building Products,Building Products,,,0,large,tier2
+CVNA,Carvana,Consumer Discretionary,Automotive Retail,Automotive Retail,,,0,large,tier2
+CASY,Casey's,Consumer Staples,Food Retail,Food Retail,,,0,large,tier2
+CBOE,Cboe Global Markets,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+CBRE,CBRE Group,Real Estate,Real Estate Services,Real Estate Services,,,0,large,tier2
+CDW,CDW Corporation,Information Technology,Technology Distributors,Technology Distributors,,,0,large,tier2
+COR,Cencora,Health Care,Health Care Distributors,Health Care Distributors,,,0,large,tier2
+CNC,Centene Corporation,Health Care,Managed Health Care,Managed Health Care,,,0,large,tier2
+CNP,CenterPoint Energy,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+CF,CF Industries,Materials,Fertilizers & Agricultural Chemicals,Fertilizers & Agricultural Chemicals,,,0,large,tier2
+CRL,Charles River Laboratories,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+SCHW,Charles Schwab Corporation,Financials,Investment Banking & Brokerage,Investment Banking & Brokerage,,,0,large,tier2
+CHTR,Charter Communications,Communication Services,Cable & Satellite,Cable & Satellite,,,0,large,tier2
+CMG,Chipotle Mexican Grill,Consumer Discretionary,Restaurants,Restaurants,,,0,large,tier2
+CB,Chubb Limited,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+CHD,Church & Dwight,Consumer Staples,Household Products,Household Products,,,0,large,tier2
+CIEN,Ciena,Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+CI,Cigna,Health Care,Health Care Services,Health Care Services,,,0,large,tier2
+CINF,Cincinnati Financial,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+CTAS,Cintas,Industrials,Diversified Support Services,Diversified Support Services,,,0,large,tier2
+CSCO,Cisco,Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+CFG,Citizens Financial Group,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+CLX,Clorox,Consumer Staples,Household Products,Household Products,,,0,large,tier2
+CME,CME Group,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+CMS,CMS Energy,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+CTSH,Cognizant,Information Technology,IT Consulting & Other Services,IT Consulting & Other Services,,,0,large,tier2
+COHR,Coherent Corp.,Information Technology,Electronic Components,Electronic Components,,,0,large,tier2
+CL,Colgate-Palmolive,Consumer Staples,Household Products,Household Products,,,0,large,tier2
+CMCSA,Comcast,Communication Services,Cable & Satellite,Cable & Satellite,,,0,large,tier2
+FIX,Comfort Systems USA,Industrials,Construction & Engineering,Construction & Engineering,,,0,large,tier2
+CAG,Conagra Brands,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+ED,Consolidated Edison,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+STZ,Constellation Brands,Consumer Staples,Distillers & Vintners,Distillers & Vintners,,,0,large,tier2
+CEG,Constellation Energy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+COO,Cooper Companies (The),Health Care,Health Care Supplies,Health Care Supplies,,,0,large,tier2
+CPRT,Copart,Industrials,Diversified Support Services,Diversified Support Services,,,0,large,tier2
+GLW,Corning Inc.,Information Technology,Electronic Components,Electronic Components,,,0,large,tier2
+CPAY,Corpay,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+CTVA,Corteva,Materials,Fertilizers & Agricultural Chemicals,Fertilizers & Agricultural Chemicals,,,0,large,tier2
+CSGP,CoStar Group,Real Estate,Real Estate Services,Real Estate Services,,,0,large,tier2
+CTRA,Coterra,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+CRH,CRH plc,Materials,Construction Materials,Construction Materials,,,0,large,tier2
+CCI,Crown Castle,Real Estate,Telecom Tower REITs,Telecom Tower REITs,,,0,large,tier2
+CSX,CSX Corporation,Industrials,Rail Transportation,Rail Transportation,,,0,large,tier2
+CMI,Cummins,Industrials,Construction Machinery & Heavy Transportation Equipment,Construction Machinery & Heavy Transportation Equipment,,,0,large,tier2
+CVS,CVS Health,Health Care,Health Care Services,Health Care Services,,,0,large,tier2
+DHR,Danaher Corporation,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+DRI,Darden Restaurants,Consumer Discretionary,Restaurants,Restaurants,,,0,large,tier2
+DVA,DaVita,Health Care,Health Care Services,Health Care Services,,,0,large,tier2
+DECK,Deckers Brands,Consumer Discretionary,Footwear,Footwear,,,0,large,tier2
+DELL,Dell Technologies,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+DAL,Delta Air Lines,Industrials,Passenger Airlines,Passenger Airlines,,,0,large,tier2
+DVN,Devon Energy,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+DXCM,Dexcom,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+FANG,Diamondback Energy,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+DLR,Digital Realty,Real Estate,Data Center REITs,Data Center REITs,,,0,large,tier2
+DG,Dollar General,Consumer Staples,Consumer Staples Merchandise Retail,Consumer Staples Merchandise Retail,,,0,large,tier2
+DLTR,Dollar Tree,Consumer Staples,Consumer Staples Merchandise Retail,Consumer Staples Merchandise Retail,,,0,large,tier2
+D,Dominion Energy,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+DPZ,Domino's,Consumer Discretionary,Restaurants,Restaurants,,,0,large,tier2
+DASH,DoorDash,Consumer Discretionary,Specialized Consumer Services,Specialized Consumer Services,,,0,large,tier2
+DOV,Dover Corporation,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+DOW,Dow Inc.,Materials,Commodity Chemicals,Commodity Chemicals,,,0,large,tier2
+DHI,D. R. Horton,Consumer Discretionary,Homebuilding,Homebuilding,,,0,large,tier2
+DTE,DTE Energy,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+DD,DuPont,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+ETN,Eaton Corporation,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+EBAY,eBay Inc.,Consumer Discretionary,Broadline Retail,Broadline Retail,,,0,large,tier2
+SATS,EchoStar,Communication Services,Wireless Telecommunication Services,Wireless Telecommunication Services,,,0,large,tier2
+ECL,Ecolab,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+EIX,Edison International,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+EW,Edwards Lifesciences,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+EA,Electronic Arts,Communication Services,Interactive Home Entertainment,Interactive Home Entertainment,,,0,large,tier2
+ELV,Elevance Health,Health Care,Managed Health Care,Managed Health Care,,,0,large,tier2
+EME,Emcor,Industrials,Construction & Engineering,Construction & Engineering,,,0,large,tier2
+EMR,Emerson Electric,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+ETR,Entergy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+EOG,EOG Resources,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+EPAM,EPAM Systems,Information Technology,IT Consulting & Other Services,IT Consulting & Other Services,,,0,large,tier2
+EQT,EQT Corporation,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+EFX,Equifax,Industrials,Research & Consulting Services,Research & Consulting Services,,,0,large,tier2
+EQIX,Equinix,Real Estate,Data Center REITs,Data Center REITs,,,0,large,tier2
+EQR,Equity Residential,Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+ERIE,Erie Indemnity,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+ESS,Essex Property Trust,Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+EL,Estée Lauder Companies (The),Consumer Staples,Personal Care Products,Personal Care Products,,,0,large,tier2
+EG,Everest Group,Financials,Reinsurance,Reinsurance,,,0,large,tier2
+EVRG,Evergy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+ES,Eversource Energy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+EXC,Exelon,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+EXE,Expand Energy,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+EXPE,Expedia Group,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+EXPD,Expeditors International,Industrials,Air Freight & Logistics,Air Freight & Logistics,,,0,large,tier2
+EXR,Extra Space Storage,Real Estate,Self-Storage REITs,Self-Storage REITs,,,0,large,tier2
+FFIV,"F5, Inc.",Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+FDS,FactSet,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+FICO,Fair Isaac,Information Technology,Application Software,Application Software,,,0,large,tier2
+FAST,Fastenal,Industrials,Trading Companies & Distributors,Trading Companies & Distributors,,,0,large,tier2
+FRT,Federal Realty Investment Trust,Real Estate,Retail REITs,Retail REITs,,,0,large,tier2
+FDX,FedEx,Industrials,Air Freight & Logistics,Air Freight & Logistics,,,0,large,tier2
+FIS,Fidelity National Information Services,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+FITB,Fifth Third Bancorp,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+FE,FirstEnergy,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+FISV,Fiserv,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+F,Ford Motor Company,Consumer Discretionary,Automobile Manufacturers,Automobile Manufacturers,,,0,large,tier2
+FTV,Fortive,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+FOXA,Fox Corporation (Class A),Communication Services,Broadcasting,Broadcasting,,,0,large,tier2
+FOX,Fox Corporation (Class B),Communication Services,Broadcasting,Broadcasting,,,0,large,tier2
+BEN,Franklin Resources,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+GRMN,Garmin,Consumer Discretionary,Consumer Electronics,Consumer Electronics,,,0,large,tier2
+IT,Gartner,Information Technology,IT Consulting & Other Services,IT Consulting & Other Services,,,0,large,tier2
+GEHC,GE HealthCare,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+GEV,GE Vernova,Industrials,Heavy Electrical Equipment,Heavy Electrical Equipment,,,0,large,tier2
+GEN,Gen Digital,Information Technology,Systems Software,Systems Software,,,0,large,tier2
+GNRC,Generac,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+GD,General Dynamics,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+GIS,General Mills,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+GM,General Motors,Consumer Discretionary,Automobile Manufacturers,Automobile Manufacturers,,,0,large,tier2
+GPC,Genuine Parts Company,Consumer Discretionary,Distributors,Distributors,,,0,large,tier2
+GILD,Gilead Sciences,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+GPN,Global Payments,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+GL,Globe Life,Financials,Life & Health Insurance,Life & Health Insurance,,,0,large,tier2
+GDDY,GoDaddy,Information Technology,Internet Services & Infrastructure,Internet Services & Infrastructure,,,0,large,tier2
+HIG,Hartford (The),Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+HAS,Hasbro,Consumer Discretionary,Leisure Products,Leisure Products,,,0,large,tier2
+HCA,HCA Healthcare,Health Care,Health Care Facilities,Health Care Facilities,,,0,large,tier2
+DOC,Healthpeak Properties,Real Estate,Health Care REITs,Health Care REITs,,,0,large,tier2
+HSIC,Henry Schein,Health Care,Health Care Distributors,Health Care Distributors,,,0,large,tier2
+HSY,Hershey Company (The),Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+HPE,Hewlett Packard Enterprise,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+HLT,Hilton Worldwide,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+HON,Honeywell,Industrials,Industrial Conglomerates,Industrial Conglomerates,,,0,large,tier2
+HRL,Hormel Foods,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+HST,Host Hotels & Resorts,Real Estate,Hotel & Resort REITs,Hotel & Resort REITs,,,0,large,tier2
+HWM,Howmet Aerospace,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+HPQ,HP Inc.,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+HUBB,Hubbell Incorporated,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+HUM,Humana,Health Care,Managed Health Care,Managed Health Care,,,0,large,tier2
+HBAN,Huntington Bancshares,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+HII,Huntington Ingalls Industries,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+IBM,IBM,Information Technology,IT Consulting & Other Services,IT Consulting & Other Services,,,0,large,tier2
+IEX,IDEX Corporation,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+IDXX,Idexx Laboratories,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+ITW,Illinois Tool Works,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+INCY,Incyte,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+IR,Ingersoll Rand,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+PODD,Insulet Corporation,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+IBKR,Interactive Brokers,Financials,Investment Banking & Brokerage,Investment Banking & Brokerage,,,0,large,tier2
+ICE,Intercontinental Exchange,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+IFF,International Flavors & Fragrances,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+IP,International Paper,Materials,Paper & Plastic Packaging Products & Materials,Paper & Plastic Packaging Products & Materials,,,0,large,tier2
+IVZ,Invesco,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+INVH,Invitation Homes,Real Estate,Single-Family Residential REITs,Single-Family Residential REITs,,,0,large,tier2
+IQV,IQVIA,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+IRM,Iron Mountain,Real Estate,Other Specialized REITs,Other Specialized REITs,,,0,large,tier2
+JBHT,J.B. Hunt,Industrials,Cargo Ground Transportation,Cargo Ground Transportation,,,0,large,tier2
+JBL,Jabil,Information Technology,Electronic Manufacturing Services,Electronic Manufacturing Services,,,0,large,tier2
+JKHY,Jack Henry & Associates,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+J,Jacobs Solutions,Industrials,Construction & Engineering,Construction & Engineering,,,0,large,tier2
+JCI,Johnson Controls,Industrials,Building Products,Building Products,,,0,large,tier2
+KVUE,Kenvue,Consumer Staples,Personal Care Products,Personal Care Products,,,0,large,tier2
+KDP,Keurig Dr Pepper,Consumer Staples,Soft Drinks & Non-alcoholic Beverages,Soft Drinks & Non-alcoholic Beverages,,,0,large,tier2
+KEY,KeyCorp,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+KEYS,Keysight Technologies,Information Technology,Electronic Equipment & Instruments,Electronic Equipment & Instruments,,,0,large,tier2
+KMB,Kimberly-Clark,Consumer Staples,Household Products,Household Products,,,0,large,tier2
+KIM,Kimco Realty,Real Estate,Retail REITs,Retail REITs,,,0,large,tier2
+KMI,Kinder Morgan,Energy,Oil & Gas Storage & Transportation,Oil & Gas Storage & Transportation,,,0,large,tier2
+KKR,KKR & Co.,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+KHC,Kraft Heinz,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+KR,Kroger,Consumer Staples,Food Retail,Food Retail,,,0,large,tier2
+LHX,L3Harris,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+LH,Labcorp,Health Care,Health Care Services,Health Care Services,,,0,large,tier2
+LVS,Las Vegas Sands,Consumer Discretionary,Casinos & Gaming,Casinos & Gaming,,,0,large,tier2
+LDOS,Leidos,Industrials,Diversified Support Services,Diversified Support Services,,,0,large,tier2
+LEN,Lennar,Consumer Discretionary,Homebuilding,Homebuilding,,,0,large,tier2
+LII,Lennox International,Industrials,Building Products,Building Products,,,0,large,tier2
+LYV,Live Nation Entertainment,Communication Services,Movies & Entertainment,Movies & Entertainment,,,0,large,tier2
+L,Loews Corporation,Financials,Multi-line Insurance,Multi-line Insurance,,,0,large,tier2
+LULU,Lululemon Athletica,Consumer Discretionary,"Apparel, Accessories & Luxury Goods","Apparel, Accessories & Luxury Goods",,,0,large,tier2
+LITE,Lumentum,Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+LYB,LyondellBasell,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+MTB,M&T Bank,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+MPC,Marathon Petroleum,Energy,Oil & Gas Refining & Marketing,Oil & Gas Refining & Marketing,,,0,large,tier2
+MAR,Marriott International,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+MRSH,Marsh McLennan,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+MLM,Martin Marietta Materials,Materials,Construction Materials,Construction Materials,,,0,large,tier2
+MAS,Masco,Industrials,Building Products,Building Products,,,0,large,tier2
+MKC,McCormick & Company,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+MCK,McKesson Corporation,Health Care,Health Care Distributors,Health Care Distributors,,,0,large,tier2
+MDT,Medtronic,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+MET,MetLife,Financials,Life & Health Insurance,Life & Health Insurance,,,0,large,tier2
+MTD,Mettler Toledo,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+MGM,MGM Resorts,Consumer Discretionary,Casinos & Gaming,Casinos & Gaming,,,0,large,tier2
+MCHP,Microchip Technology,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+MAA,Mid-America Apartment Communities,Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+TAP,Molson Coors Beverage Company,Consumer Staples,Brewers,Brewers,,,0,large,tier2
+MDLZ,Mondelez International,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+MPWR,Monolithic Power Systems,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+MNST,Monster Beverage,Consumer Staples,Soft Drinks & Non-alcoholic Beverages,Soft Drinks & Non-alcoholic Beverages,,,0,large,tier2
+MCO,Moody's Corporation,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+MOS,Mosaic Company (The),Materials,Fertilizers & Agricultural Chemicals,Fertilizers & Agricultural Chemicals,,,0,large,tier2
+MSI,Motorola Solutions,Information Technology,Communications Equipment,Communications Equipment,,,0,large,tier2
+MSCI,MSCI Inc.,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+NDAQ,"Nasdaq, Inc.",Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+NTAP,NetApp,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+NWSA,News Corp (Class A),Communication Services,Publishing,Publishing,,,0,large,tier2
+NWS,News Corp (Class B),Communication Services,Publishing,Publishing,,,0,large,tier2
+NI,NiSource,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+NDSN,Nordson Corporation,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+NSC,Norfolk Southern,Industrials,Rail Transportation,Rail Transportation,,,0,large,tier2
+NTRS,Northern Trust,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+NOC,Northrop Grumman,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+NCLH,Norwegian Cruise Line Holdings,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+NRG,NRG Energy,Utilities,Independent Power Producers & Energy Traders,Independent Power Producers & Energy Traders,,,0,large,tier2
+NUE,Nucor,Materials,Steel,Steel,,,0,large,tier2
+NVR,"NVR, Inc.",Consumer Discretionary,Homebuilding,Homebuilding,,,0,large,tier2
+NXPI,NXP Semiconductors,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+ORLY,O’Reilly Automotive,Consumer Discretionary,Automotive Retail,Automotive Retail,,,0,large,tier2
+ODFL,Old Dominion,Industrials,Cargo Ground Transportation,Cargo Ground Transportation,,,0,large,tier2
+OMC,Omnicom Group,Communication Services,Advertising,Advertising,,,0,large,tier2
+ON,ON Semiconductor,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+OKE,Oneok,Energy,Oil & Gas Storage & Transportation,Oil & Gas Storage & Transportation,,,0,large,tier2
+OTIS,Otis Worldwide,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+PCAR,Paccar,Industrials,Construction Machinery & Heavy Transportation Equipment,Construction Machinery & Heavy Transportation Equipment,,,0,large,tier2
+PKG,Packaging Corporation of America,Materials,Paper & Plastic Packaging Products & Materials,Paper & Plastic Packaging Products & Materials,,,0,large,tier2
+PSKY,Paramount Skydance Corporation,Communication Services,Movies & Entertainment,Movies & Entertainment,,,0,large,tier2
+PH,Parker Hannifin,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+PAYX,Paychex,Industrials,Human Resource & Employment Services,Human Resource & Employment Services,,,0,large,tier2
+PYPL,PayPal,Financials,Transaction & Payment Processing Services,Transaction & Payment Processing Services,,,0,large,tier2
+PNR,Pentair,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+PCG,PG&E Corporation,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+PM,Philip Morris International,Consumer Staples,Tobacco,Tobacco,,,0,large,tier2
+PSX,Phillips 66,Energy,Oil & Gas Refining & Marketing,Oil & Gas Refining & Marketing,,,0,large,tier2
+PNW,Pinnacle West Capital,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+PNC,PNC Financial Services,Financials,Diversified Banks,Diversified Banks,,,0,large,tier2
+POOL,Pool Corporation,Consumer Discretionary,Distributors,Distributors,,,0,large,tier2
+PPG,PPG Industries,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+PPL,PPL Corporation,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+PFG,Principal Financial Group,Financials,Life & Health Insurance,Life & Health Insurance,,,0,large,tier2
+PGR,Progressive Corporation,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+PRU,Prudential Financial,Financials,Life & Health Insurance,Life & Health Insurance,,,0,large,tier2
+PEG,Public Service Enterprise Group,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+PTC,PTC Inc.,Information Technology,Application Software,Application Software,,,0,large,tier2
+PSA,Public Storage,Real Estate,Self-Storage REITs,Self-Storage REITs,,,0,large,tier2
+PHM,PulteGroup,Consumer Discretionary,Homebuilding,Homebuilding,,,0,large,tier2
+PWR,Quanta Services,Industrials,Construction & Engineering,Construction & Engineering,,,0,large,tier2
+DGX,Quest Diagnostics,Health Care,Health Care Services,Health Care Services,,,0,large,tier2
+Q,Qnity Electronics,Information Technology,Semiconductor Materials & Equipment,Semiconductor Materials & Equipment,,,0,large,tier2
+RL,Ralph Lauren Corporation,Consumer Discretionary,"Apparel, Accessories & Luxury Goods","Apparel, Accessories & Luxury Goods",,,0,large,tier2
+RJF,Raymond James Financial,Financials,Investment Banking & Brokerage,Investment Banking & Brokerage,,,0,large,tier2
+O,Realty Income,Real Estate,Retail REITs,Retail REITs,,,0,large,tier2
+REG,Regency Centers,Real Estate,Retail REITs,Retail REITs,,,0,large,tier2
+REGN,Regeneron Pharmaceuticals,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+RF,Regions Financial Corporation,Financials,Regional Banks,Regional Banks,,,0,large,tier2
+RSG,Republic Services,Industrials,Environmental & Facilities Services,Environmental & Facilities Services,,,0,large,tier2
+RMD,ResMed,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+RVTY,Revvity,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+HOOD,Robinhood Markets,Financials,Investment Banking & Brokerage,Investment Banking & Brokerage,,,0,large,tier2
+ROK,Rockwell Automation,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+ROL,"Rollins, Inc.",Industrials,Environmental & Facilities Services,Environmental & Facilities Services,,,0,large,tier2
+ROP,Roper Technologies,Information Technology,Electronic Equipment & Instruments,Electronic Equipment & Instruments,,,0,large,tier2
+ROST,Ross Stores,Consumer Discretionary,Apparel Retail,Apparel Retail,,,0,large,tier2
+RCL,Royal Caribbean Group,Consumer Discretionary,"Hotels, Resorts & Cruise Lines","Hotels, Resorts & Cruise Lines",,,0,large,tier2
+SPGI,S&P Global,Financials,Financial Exchanges & Data,Financial Exchanges & Data,,,0,large,tier2
+SNDK,Sandisk,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+SBAC,SBA Communications,Real Estate,Telecom Tower REITs,Telecom Tower REITs,,,0,large,tier2
+STX,Seagate Technology,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+SRE,Sempra,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+SHW,Sherwin-Williams,Materials,Specialty Chemicals,Specialty Chemicals,,,0,large,tier2
+SWKS,Skyworks Solutions,Information Technology,Semiconductors,Semiconductors,,,0,large,tier2
+SJM,J.M. Smucker Company (The),Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+SW,Smurfit Westrock,Materials,Paper & Plastic Packaging Products & Materials,Paper & Plastic Packaging Products & Materials,,,0,large,tier2
+SNA,Snap-on,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+SOLV,Solventum,Health Care,Health Care Technology,Health Care Technology,,,0,large,tier2
+LUV,Southwest Airlines,Industrials,Passenger Airlines,Passenger Airlines,,,0,large,tier2
+SWK,Stanley Black & Decker,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+STT,State Street Corporation,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+STLD,Steel Dynamics,Materials,Steel,Steel,,,0,large,tier2
+STE,Steris,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+SYK,Stryker Corporation,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+SYF,Synchrony Financial,Financials,Consumer Finance,Consumer Finance,,,0,large,tier2
+SNPS,Synopsys,Information Technology,Application Software,Application Software,,,0,large,tier2
+SYY,Sysco,Consumer Staples,Food Distributors,Food Distributors,,,0,large,tier2
+TMUS,T-Mobile US,Communication Services,Wireless Telecommunication Services,Wireless Telecommunication Services,,,0,large,tier2
+TROW,T. Rowe Price,Financials,Asset Management & Custody Banks,Asset Management & Custody Banks,,,0,large,tier2
+TTWO,Take-Two Interactive,Communication Services,Interactive Home Entertainment,Interactive Home Entertainment,,,0,large,tier2
+TPR,"Tapestry, Inc.",Consumer Discretionary,"Apparel, Accessories & Luxury Goods","Apparel, Accessories & Luxury Goods",,,0,large,tier2
+TRGP,Targa Resources,Energy,Oil & Gas Storage & Transportation,Oil & Gas Storage & Transportation,,,0,large,tier2
+TGT,Target Corporation,Consumer Staples,Consumer Staples Merchandise Retail,Consumer Staples Merchandise Retail,,,0,large,tier2
+TEL,TE Connectivity,Information Technology,Electronic Manufacturing Services,Electronic Manufacturing Services,,,0,large,tier2
+TDY,Teledyne Technologies,Information Technology,Electronic Equipment & Instruments,Electronic Equipment & Instruments,,,0,large,tier2
+TER,Teradyne,Information Technology,Semiconductor Materials & Equipment,Semiconductor Materials & Equipment,,,0,large,tier2
+TPL,Texas Pacific Land Corporation,Energy,Oil & Gas Exploration & Production,Oil & Gas Exploration & Production,,,0,large,tier2
+TXT,Textron,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+TMO,Thermo Fisher Scientific,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+TJX,TJX Companies,Consumer Discretionary,Apparel Retail,Apparel Retail,,,0,large,tier2
+TKO,TKO Group Holdings,Communication Services,Movies & Entertainment,Movies & Entertainment,,,0,large,tier2
+TTD,Trade Desk (The),Communication Services,Advertising,Advertising,,,0,large,tier2
+TSCO,Tractor Supply,Consumer Discretionary,Other Specialty Retail,Other Specialty Retail,,,0,large,tier2
+TT,Trane Technologies,Industrials,Building Products,Building Products,,,0,large,tier2
+TDG,TransDigm Group,Industrials,Aerospace & Defense,Aerospace & Defense,,,0,large,tier2
+TRV,Travelers Companies (The),Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+TRMB,Trimble Inc.,Information Technology,Electronic Equipment & Instruments,Electronic Equipment & Instruments,,,0,large,tier2
+TFC,Truist Financial,Financials,Diversified Banks,Diversified Banks,,,0,large,tier2
+TYL,Tyler Technologies,Information Technology,Application Software,Application Software,,,0,large,tier2
+TSN,Tyson Foods,Consumer Staples,Packaged Foods & Meats,Packaged Foods & Meats,,,0,large,tier2
+USB,U.S. Bancorp,Financials,Diversified Banks,Diversified Banks,,,0,large,tier2
+UDR,"UDR, Inc.",Real Estate,Multi-Family Residential REITs,Multi-Family Residential REITs,,,0,large,tier2
+ULTA,Ulta Beauty,Consumer Discretionary,Other Specialty Retail,Other Specialty Retail,,,0,large,tier2
+UAL,United Airlines Holdings,Industrials,Passenger Airlines,Passenger Airlines,,,0,large,tier2
+URI,United Rentals,Industrials,Trading Companies & Distributors,Trading Companies & Distributors,,,0,large,tier2
+UHS,Universal Health Services,Health Care,Health Care Facilities,Health Care Facilities,,,0,large,tier2
+VLO,Valero Energy,Energy,Oil & Gas Refining & Marketing,Oil & Gas Refining & Marketing,,,0,large,tier2
+VTR,Ventas,Real Estate,Health Care REITs,Health Care REITs,,,0,large,tier2
+VLTO,Veralto,Industrials,Environmental & Facilities Services,Environmental & Facilities Services,,,0,large,tier2
+VRSN,Verisign,Information Technology,Internet Services & Infrastructure,Internet Services & Infrastructure,,,0,large,tier2
+VRSK,Verisk Analytics,Industrials,Research & Consulting Services,Research & Consulting Services,,,0,large,tier2
+VZ,Verizon,Communication Services,Integrated Telecommunication Services,Integrated Telecommunication Services,,,0,large,tier2
+VRTX,Vertex Pharmaceuticals,Health Care,Biotechnology,Biotechnology,,,0,large,tier2
+VRT,Vertiv,Industrials,Electrical Components & Equipment,Electrical Components & Equipment,,,0,large,tier2
+VTRS,Viatris,Health Care,Pharmaceuticals,Pharmaceuticals,,,0,large,tier2
+VICI,Vici Properties,Real Estate,Hotel & Resort REITs,Hotel & Resort REITs,,,0,large,tier2
+VST,Vistra Corp.,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+VMC,Vulcan Materials Company,Materials,Construction Materials,Construction Materials,,,0,large,tier2
+WRB,W. R. Berkley Corporation,Financials,Property & Casualty Insurance,Property & Casualty Insurance,,,0,large,tier2
+GWW,W. W. Grainger,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+WAB,Wabtec,Industrials,Construction Machinery & Heavy Transportation Equipment,Construction Machinery & Heavy Transportation Equipment,,,0,large,tier2
+WBD,Warner Bros. Discovery,Communication Services,Broadcasting,Broadcasting,,,0,large,tier2
+WM,Waste Management,Industrials,Environmental & Facilities Services,Environmental & Facilities Services,,,0,large,tier2
+WAT,Waters Corporation,Health Care,Life Sciences Tools & Services,Life Sciences Tools & Services,,,0,large,tier2
+WEC,WEC Energy Group,Utilities,Electric Utilities,Electric Utilities,,,0,large,tier2
+WELL,Welltower,Real Estate,Health Care REITs,Health Care REITs,,,0,large,tier2
+WST,West Pharmaceutical Services,Health Care,Health Care Supplies,Health Care Supplies,,,0,large,tier2
+WDC,Western Digital,Information Technology,"Technology Hardware, Storage & Peripherals","Technology Hardware, Storage & Peripherals",,,0,large,tier2
+WY,Weyerhaeuser,Real Estate,Timber REITs,Timber REITs,,,0,large,tier2
+WSM,"Williams-Sonoma, Inc.",Consumer Discretionary,Homefurnishing Retail,Homefurnishing Retail,,,0,large,tier2
+WMB,Williams Companies,Energy,Oil & Gas Storage & Transportation,Oil & Gas Storage & Transportation,,,0,large,tier2
+WTW,Willis Towers Watson,Financials,Insurance Brokers,Insurance Brokers,,,0,large,tier2
+WDAY,"Workday, Inc.",Information Technology,Application Software,Application Software,,,0,large,tier2
+WYNN,Wynn Resorts,Consumer Discretionary,Casinos & Gaming,Casinos & Gaming,,,0,large,tier2
+XEL,Xcel Energy,Utilities,Multi-Utilities,Multi-Utilities,,,0,large,tier2
+XYL,Xylem Inc.,Industrials,Industrial Machinery & Supplies & Components,Industrial Machinery & Supplies & Components,,,0,large,tier2
+YUM,Yum! Brands,Consumer Discretionary,Restaurants,Restaurants,,,0,large,tier2
+ZBRA,Zebra Technologies,Information Technology,Electronic Equipment & Instruments,Electronic Equipment & Instruments,,,0,large,tier2
+ZBH,Zimmer Biomet,Health Care,Health Care Equipment,Health Care Equipment,,,0,large,tier2
+ZTS,Zoetis,Health Care,Pharmaceuticals,Pharmaceuticals,,,0,large,tier2
