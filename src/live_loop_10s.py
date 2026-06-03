@@ -56,6 +56,7 @@ log = logging.getLogger("paper_session")
 
 from config.risk_limits import (
     MIN_UNIFIED_SCORE,
+    MIN_CATALYST_SCORE,
     MIN_ADV20_DOLLARS,
     MIN_ATR_PCT,
     MIN_VOLUME_ACCEL,
@@ -63,6 +64,8 @@ from config.risk_limits import (
     PRICE_MIN as CFG_PRICE_MIN,
     PRICE_MAX as CFG_PRICE_MAX,
     PRICE_MAX_ALLOWLIST,
+    MAX_RISK_PER_TRADE_PCT as CFG_MAX_RISK_PER_TRADE_PCT,
+    MAX_OPEN_RISK_PCT as CFG_MAX_OPEN_RISK_PCT,
 )
 
 # ====== CATALYST-DRIVEN TRADING ENGINE ======
@@ -77,13 +80,15 @@ except ImportError as e:
 
 
 # ---- Risk Framework ----
-BASE_RISK_PER_TRADE = 0.005
+# Base risk-per-trade and portfolio open-risk are authoritative in
+# config/risk_limits.py; conviction-mode multipliers are monolith-only tuning.
+BASE_RISK_PER_TRADE = CFG_MAX_RISK_PER_TRADE_PCT
 CONVICTION_RISK_PER_TRADE = 0.0075
-BASE_MAX_TOTAL_OPEN_RISK = 0.02
+BASE_MAX_TOTAL_OPEN_RISK = CFG_MAX_OPEN_RISK_PCT
 CONVICTION_MAX_TOTAL_OPEN_RISK = 0.045
 BASE_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_MAX_CONCURRENT_POSITIONS", "10"))
 CONVICTION_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_CONVICTION_MAX_CONCURRENT_POSITIONS", "12"))
-MIN_CATALYST_SCORE = 60.0  # Catalyst score threshold for trading (tuned for higher candidate flow)
+# MIN_CATALYST_SCORE imported from config/risk_limits.py (authoritative).
 
 # Phase 2: Unified score weights
 UNIFIED_CATALYST_WEIGHT = 0.60
@@ -119,7 +124,6 @@ TRAIL_ATR_MULT = 1.2
 TRAIL_ACTIVATE_ATR = 1.5
 TRAIL_CHECK_SECONDS = 30
 
-MIN_PRICE = 2.0
 PRINT_HEARTBEAT_SECONDS = 60
 
 # Cache ATR so we don’t request daily bars repeatedly
