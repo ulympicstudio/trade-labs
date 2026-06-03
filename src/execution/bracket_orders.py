@@ -27,6 +27,43 @@ class BracketParams:
     # attached AFTER a confirmed fill via place_trailing_stop(), NOT at entry.
     tif: str = "DAY"
 
+    @classmethod
+    def from_plan(cls, plan) -> "BracketParams":
+        """Build canonical bracket params from a bus ``OrderPlan``.
+
+        The risk arm always emits ``entry_type="LMT"`` with a single
+        ``limit_prices`` entry and a ``stop_price``; this is the one place
+        that maps that intent onto the bracket builder so the OrderPlan and
+        OrderBlueprint execution paths construct identical orders.
+        """
+        entry = float(plan.limit_prices[0]) if plan.limit_prices else float(plan.stop_price)
+        trail_pct = float(plan.trail_params.get("trail_pct", 0.0) or 0.0)
+        return cls(
+            symbol=plan.symbol,
+            qty=int(plan.qty),
+            entry_limit=round(entry, 2),
+            stop_loss=round(float(plan.stop_price), 2),
+            trail_amount=round(entry * (trail_pct / 100.0), 2),
+            tif=getattr(plan, "tif", "DAY") or "DAY",
+        )
+
+    @classmethod
+    def from_blueprint(cls, bp) -> "BracketParams":
+        """Build canonical bracket params from a premarket ``OrderBlueprint``.
+
+        Entry is the mid of the entry ladder, matching the prior inline
+        construction in execution_main._on_order_blueprint.
+        """
+        entry = bp.entry_ladder[len(bp.entry_ladder) // 2] if bp.entry_ladder else 0.0
+        return cls(
+            symbol=bp.symbol,
+            qty=int(bp.qty),
+            entry_limit=round(float(entry), 2),
+            stop_loss=round(float(bp.stop_price), 2),
+            trail_amount=round(float(entry) * (bp.trail_pct / 100.0), 2),
+            tif="DAY",
+        )
+
 
 @dataclass
 class BracketResult:

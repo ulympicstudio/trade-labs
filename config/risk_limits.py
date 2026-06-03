@@ -15,6 +15,10 @@ MAX_RISK_PER_TRADE_PCT = 0.005  # 0.5% default, can be overridden by scoring lat
 # Unified score (0.60 * CatalystScore + 0.40 * QuantScore)
 MIN_UNIFIED_SCORE = 70
 
+# Standalone catalyst-score gate (CatalystScore must clear this before a
+# candidate is scored). Authoritative value for the production path.
+MIN_CATALYST_SCORE = 60.0
+
 # Hyper-swing universe gates
 MIN_ADV20_DOLLARS = 25_000_000   # Minimum 20-day avg daily $ volume
 MIN_ATR_PCT       = 0.008        # ATR / price >= 0.8%

@@ -1,7 +1,22 @@
-# TODO(migration): This 10s monolith is NOT the canonical execution path. The
-# canonical system is the src/arms/* bus architecture. This file is retained and
-# its P0 throughput bug fixed in this PR, but it is slated for retirement in a
-# dedicated follow-up PR once arms/* reaches feature parity. Do not extend it.
+# DEPRECATED FALLBACK ENTRY POINT — NOT the canonical execution path.
+#
+# The canonical system is the src/arms/* event-driven bus architecture
+# (ingest → signal → risk → execution → monitor). This 10s loop is retained
+# only as a single-process fallback until arms/* is validated on paper.
+#
+# It no longer carries duplicated trading *logic*: it delegates to the SAME
+# shared modules the arms use —
+#   * order construction  → src.execution.bracket_orders (LIMIT entry + STOP,
+#                            broker-ack verified; the single bracket builder),
+#   * universe / signal    → src.signals.* (scanner, candidate pool, validator,
+#                            score_candidates) and src.quant.*,
+#   * risk / regime        → src.risk.* (daily_pnl_manager, regime,
+#                            exit_intelligence),
+#   * thresholds           → config.risk_limits (authoritative).
+# What remains here is orchestration glue plus a few monolith-local helpers
+# (get_daily_30d / atr14_from_daily — uncached, raise-on-error variants kept
+# intentionally to preserve this loop's exact behaviour) and the kill-switch
+# weakness-close market liquidation. Do not extend it; add features to arms/*.
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -56,6 +71,7 @@ log = logging.getLogger("paper_session")
 
 from config.risk_limits import (
     MIN_UNIFIED_SCORE,
+    MIN_CATALYST_SCORE,
     MIN_ADV20_DOLLARS,
     MIN_ATR_PCT,
     MIN_VOLUME_ACCEL,
@@ -63,6 +79,8 @@ from config.risk_limits import (
     PRICE_MIN as CFG_PRICE_MIN,
     PRICE_MAX as CFG_PRICE_MAX,
     PRICE_MAX_ALLOWLIST,
+    MAX_RISK_PER_TRADE_PCT as CFG_MAX_RISK_PER_TRADE_PCT,
+    MAX_OPEN_RISK_PCT as CFG_MAX_OPEN_RISK_PCT,
 )
 
 # ====== CATALYST-DRIVEN TRADING ENGINE ======
@@ -77,13 +95,15 @@ except ImportError as e:
 
 
 # ---- Risk Framework ----
-BASE_RISK_PER_TRADE = 0.005
+# Base risk-per-trade and portfolio open-risk are authoritative in
+# config/risk_limits.py; conviction-mode multipliers are monolith-only tuning.
+BASE_RISK_PER_TRADE = CFG_MAX_RISK_PER_TRADE_PCT
 CONVICTION_RISK_PER_TRADE = 0.0075
-BASE_MAX_TOTAL_OPEN_RISK = 0.02
+BASE_MAX_TOTAL_OPEN_RISK = CFG_MAX_OPEN_RISK_PCT
 CONVICTION_MAX_TOTAL_OPEN_RISK = 0.045
 BASE_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_MAX_CONCURRENT_POSITIONS", "10"))
 CONVICTION_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_CONVICTION_MAX_CONCURRENT_POSITIONS", "12"))
-MIN_CATALYST_SCORE = 60.0  # Catalyst score threshold for trading (tuned for higher candidate flow)
+# MIN_CATALYST_SCORE imported from config/risk_limits.py (authoritative).
 
 # Phase 2: Unified score weights
 UNIFIED_CATALYST_WEIGHT = 0.60
@@ -119,7 +139,6 @@ TRAIL_ATR_MULT = 1.2
 TRAIL_ACTIVATE_ATR = 1.5
 TRAIL_CHECK_SECONDS = 30
 
-MIN_PRICE = 2.0
 PRINT_HEARTBEAT_SECONDS = 60
 
 # Cache ATR so we don’t request daily bars repeatedly

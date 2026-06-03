@@ -222,29 +222,20 @@ _story_fp_cache: Dict[str, dict] = {}
 _story_bucket_index: Dict[int, list] = {}
 # --- Cluster-key consensus state ---
 _story_cluster_cache: Dict[str, dict] = {}  # cluster_key → {ts, providers, example, symbols}
-def _extract_canonical_domain(url: str) -> str:
-    try:
-        if not url:
-            return "unknown"
-        p = urlparse(url)
-        host = p.netloc.lower()
-        if host:
-            # Remove www.
-            if host.startswith("www."):
-                host = host[4:]
-            return host
-    except Exception:
-        pass
-    return "unknown"
+# URL canonicalization / Google-News resolution moved to src/data/url_resolver.py.
+# Private aliases keep existing call sites unchanged.
+from src.data.url_resolver import (
+    extract_canonical_domain as _extract_canonical_domain,
+    publisher_hint_domain_from_headline as _publisher_hint_domain_from_headline,
+    canonicalize_url as _canonicalize_url,
+    resolve_redirect_url as _resolve_redirect_url,
+    is_google_domain as _is_google_domain,
+    extract_gnews_rss_target as _extract_gnews_rss_target,
+    gnews_articles_url_from_rss as _gnews_articles_url_from_rss,
+    GOOGLE_DOMAIN_BLOCKLIST as _GOOGLE_DOMAIN_BLOCKLIST,
+    URL_STRIP_PARAMS as _URL_STRIP_PARAMS,
+)
 
-def _publisher_hint_domain_from_headline(headline: str) -> str:
-    # Try to extract a publisher domain from the headline (very basic)
-    # e.g. "Reuters: ..." or "(Bloomberg) ..."
-    import re
-    m = re.match(r"([A-Za-z0-9\-\.]+)[:\)]", headline)
-    if m:
-        return m.group(1).lower()
-    return "unknown"
 
 def _compute_cluster_key(art: dict) -> str:
     # bucket15m
@@ -270,174 +261,9 @@ _STORY_FP_MAX = 50_000
 _FUZZY_JACCARD_THRESHOLD = float(os.environ.get("TL_FUZZY_JACCARD_THRESHOLD", "0.20"))
 _FUZZY_MAX_CANDIDATES = 50
 
-# Tracking params stripped during URL normalisation
-_URL_STRIP_PARAMS = frozenset({
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "fbclid", "gclid", "msclkid", "ref", "source", "si",
-})
 
-
-# --- Standardized helpers ---
-def _canonicalize_url(url: str) -> str:
-    """Strips tracking params and normalizes to scheme://netloc/path. Never raises."""
-    try:
-        p = urlparse(url)
-        netloc = p.netloc.lower()
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        return f"{p.scheme}://{netloc}{p.path}" if netloc else url
-    except Exception:
-        return url
-
-def _resolve_redirect_url(url: str, timeout_s: float) -> str | None:
-    """HEAD allow_redirects=True, fallback GET. Never raises."""
-    import requests
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,*/*",
-    }
-    try:
-        resp = requests.head(url, allow_redirects=True, timeout=timeout_s, headers=headers)
-        if resp.url and resp.url != url:
-            return resp.url
-    except Exception:
-        pass
-    try:
-        resp = requests.get(url, allow_redirects=True, timeout=timeout_s, headers=headers, stream=True)
-        if resp.url and resp.url != url:
-            return resp.url
-    except Exception:
-        pass
-    return None
-
-
-# Domains to reject when extracting publisher URLs from Google News blobs
-_GOOGLE_DOMAIN_BLOCKLIST = frozenset({
-    "news.google.com", "google.com", "www.google.com",
-    "accounts.google.com", "consent.google.com",
-    "play.google.com", "support.google.com",
-    "googleusercontent.com", "googlesyndication.com",
-    "googleapis.com", "gstatic.com",
-    "youtube.com", "www.youtube.com",
-    "doubleclick.net",
-    "google-analytics.com", "www.google-analytics.com",
-    "googletagmanager.com", "angular.dev",
-})
-
-
-def _is_google_domain(candidate_url: str) -> bool:
-    """Check if a URL's domain belongs to Google/blocked infrastructure."""
-    try:
-        p = urlparse(candidate_url)
-        dom = p.netloc.lower()
-        if dom.startswith("www."):
-            dom = dom[4:]
-        if dom in _GOOGLE_DOMAIN_BLOCKLIST:
-            return True
-        # Catch any remaining *.google.com subdomains
-        if dom.endswith(".google.com") or dom == "google.com":
-            return True
-        # Catch *.googleapis.com, *.googleusercontent.com, etc.
-        for suffix in (".googleapis.com", ".googleusercontent.com",
-                        ".googlesyndication.com", ".gstatic.com",
-                        ".doubleclick.net"):
-            if dom.endswith(suffix):
-                return True
-        return False
-    except Exception:
-        return True  # if we can't parse, reject it
-
-
-def _extract_gnews_rss_target(url: str) -> str | None:
-    """Extract the real publisher URL from a Google News RSS article link.
-
-    GNews RSS links look like:
-        https://news.google.com/rss/articles/<base64url-token>?...
-    The token is typically URL-safe base64 WITHOUT padding.
-    The decoded payload is a small protobuf blob that embeds the target URL.
-
-    Collects ALL http(s) URLs from decoded bytes, returns the first one
-    whose domain is NOT in the Google blocklist.  Returns None if only
-    Google/infra URLs are found (so the HTML-fetch fallback can run).
-    """
-    import base64 as _b64
-    try:
-        p = urlparse(url)
-        path = p.path  # e.g. /rss/articles/CBMi...
-        if "/articles/" not in path:
-            return None
-        token = path.split("/articles/")[-1]
-        # Strip trailing segments and query params
-        token = token.split("/")[0].split("?")[0]
-        if not token or len(token) < 20:
-            return None
-
-        # Terminator bytes for URL extraction from protobuf blobs
-        _TERM = set(b' \t\n\r"\'\\\x3c\x3e\x00\x01\x02\x03\x04\x05\x06\x07\x08')
-
-        def _scan_all_urls(data: bytes) -> list[str]:
-            """Extract ALL http(s) URLs from raw bytes."""
-            found: list[str] = []
-            for prefix in (b"https://", b"http://"):
-                start = 0
-                while True:
-                    idx = data.find(prefix, start)
-                    if idx < 0:
-                        break
-                    end = idx + len(prefix)
-                    while end < len(data) and data[end] not in _TERM:
-                        end += 1
-                    candidate = data[idx:end].decode("ascii", errors="ignore")
-                    if len(candidate) > 12:
-                        found.append(candidate)
-                    start = idx + 1
-            return found
-
-        def _pick_publisher(urls: list[str]) -> str | None:
-            """Return the first URL whose domain is not Google infra."""
-            for u in urls:
-                if not _is_google_domain(u):
-                    return u
-            return None
-
-        # Attempt 1: URL-safe base64 decode (no padding)
-        padded = token + "=" * (-len(token) % 4)
-        try:
-            decoded = _b64.urlsafe_b64decode(padded)
-            hit = _pick_publisher(_scan_all_urls(decoded))
-            if hit:
-                return hit
-        except Exception:
-            pass
-
-        # Attempt 2: standard base64 decode (validate=False tolerates junk)
-        try:
-            decoded2 = _b64.b64decode(padded, validate=False)
-            hit2 = _pick_publisher(_scan_all_urls(decoded2))
-            if hit2:
-                return hit2
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return None
-
-
-def _gnews_articles_url_from_rss(rss_url: str) -> str:
-    """Convert ``/rss/articles/<token>`` → ``/articles/<token>``.
-
-    The non-RSS variant of Google News article pages exposes the
-    outbound publisher URL more reliably than the ``/rss/`` SPA page.
-    If the URL doesn't match the expected pattern it is returned unchanged.
-    """
-    from urllib.parse import urlparse, urlunparse
-    p = urlparse(rss_url)
-    if p.path.startswith("/rss/articles/"):
-        new_path = p.path.replace("/rss/articles/", "/articles/", 1)
-        return urlunparse(p._replace(path=new_path))
-    return rss_url
+# URL canonicalization / redirect / Google-News helpers now live in
+# src/data/url_resolver.py (imported above as private aliases).
 
 
 def _fetch_gnews_rss_article_page_target(url: str, timeout_s: float) -> str | None:
