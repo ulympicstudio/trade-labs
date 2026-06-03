@@ -1,7 +1,22 @@
-# TODO(migration): This 10s monolith is NOT the canonical execution path. The
-# canonical system is the src/arms/* bus architecture. This file is retained and
-# its P0 throughput bug fixed in this PR, but it is slated for retirement in a
-# dedicated follow-up PR once arms/* reaches feature parity. Do not extend it.
+# DEPRECATED FALLBACK ENTRY POINT — NOT the canonical execution path.
+#
+# The canonical system is the src/arms/* event-driven bus architecture
+# (ingest → signal → risk → execution → monitor). This 10s loop is retained
+# only as a single-process fallback until arms/* is validated on paper.
+#
+# It no longer carries duplicated trading *logic*: it delegates to the SAME
+# shared modules the arms use —
+#   * order construction  → src.execution.bracket_orders (LIMIT entry + STOP,
+#                            broker-ack verified; the single bracket builder),
+#   * universe / signal    → src.signals.* (scanner, candidate pool, validator,
+#                            score_candidates) and src.quant.*,
+#   * risk / regime        → src.risk.* (daily_pnl_manager, regime,
+#                            exit_intelligence),
+#   * thresholds           → config.risk_limits (authoritative).
+# What remains here is orchestration glue plus a few monolith-local helpers
+# (get_daily_30d / atr14_from_daily — uncached, raise-on-error variants kept
+# intentionally to preserve this loop's exact behaviour) and the kill-switch
+# weakness-close market liquidation. Do not extend it; add features to arms/*.
 from dotenv import load_dotenv
 load_dotenv()
 
