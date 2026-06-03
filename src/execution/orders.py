@@ -95,22 +95,35 @@ def place_order(req: OrderRequest, ib: Optional[IB] = None) -> OrderResult:
         )
 
     # ---- REAL IB PAPER ORDER SUBMISSION ----
+    # DEPRECATED PATH: this market-entry + stop helper predates the bracket
+    # module. New code should route through
+    # ``src.execution.bracket_orders.place_limit_tp_trail_bracket`` (LIMIT entry
+    # + OCA-linked STOP, verified by broker ack). Retained only for legacy
+    # callers; the stop below is now bound to its parent (parentId + transmit
+    # chaining) so it can never be left as a naked/orphaned stop.
     contract = _make_contract(req.symbol)
     ib.qualifyContracts(contract)
 
     action = req.side.upper()
     qty = int(req.quantity)
+    has_stop = req.stop_loss is not None
 
     parent = MarketOrder(action, qty)
+    # If a stop follows, the parent is NOT the last leg: do not transmit yet.
+    parent.transmit = not has_stop
     ib.placeOrder(contract, parent)
     ib.sleep(1.0)
     parent_id = parent.orderId
 
     stop_id = None
-    if req.stop_loss is not None:
+    if has_stop:
         stop_price = float(req.stop_loss)
         stop_action = "SELL" if action == "BUY" else "BUY"
         stop_order = StopOrder(stop_action, qty, stop_price)
+        # Bind the stop to its entry so a partial fill / cancel can't leave a
+        # mismatched naked stop. The stop is the last leg → transmit=True.
+        stop_order.parentId = parent_id
+        stop_order.transmit = True
         ib.placeOrder(contract, stop_order)
         ib.sleep(1.0)
         stop_id = stop_order.orderId

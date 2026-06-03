@@ -112,59 +112,58 @@ def full_workflow():
 def execute_trades(approved_positions, ib: IB):
     """
     Execute approved positions automatically.
-    WARNING: This places real orders!
+    WARNING: This places real orders (paper-gated by TRADE_LABS_ARMED).
+
+    Redirected to the canonical bracket module
+    (``src.execution.bracket_orders.place_limit_tp_trail_bracket``): a LIMIT
+    entry + OCA-linked STOP. There is NO take-profit limit leg — the trailing
+    stop (attached after fill) is the profit-taker. Only LONG entries are
+    supported via this helper; SHORT entries are skipped.
+
+    NOTE: the previous implementation imported ``place_limit_order`` /
+    ``place_stop_order`` which never existed in ``src.execution.orders`` —
+    calling this function used to crash on import.
     """
-    from src.execution.orders import place_limit_order, place_stop_order
-    
-    print("\n⚠️  EXECUTING LIVE ORDERS ⚠️\n")
-    
+    from src.execution.bracket_orders import (
+        BracketParams,
+        place_limit_tp_trail_bracket,
+    )
+
+    print("\n⚠️  EXECUTING ORDERS (paper-gated by TRADE_LABS_ARMED) ⚠️\n")
+
     executed_orders = []
-    
+
     for position in approved_positions:
         symbol = position['symbol']
         direction = position['direction']
         quantity = position['quantity']
-        
+
+        if direction != "LONG":
+            print(f"⊘ {symbol}: SHORT entries not supported by the bracket helper — skipped")
+            continue
+
         try:
-            # Entry order
-            entry_order = place_limit_order(
-                ib=ib,
+            params = BracketParams(
                 symbol=symbol,
-                action="BUY" if direction == "LONG" else "SELL",
-                quantity=quantity,
-                limit_price=position['entry_price']
+                qty=int(quantity),
+                entry_limit=float(position['entry_price']),
+                stop_loss=float(position['stop_loss']),
+                trail_amount=0.0,  # trailing stop attaches after confirmed fill
+                tif="DAY",
             )
-            
-            # Stop loss
-            stop_order = place_stop_order(
-                ib=ib,
-                symbol=symbol,
-                action="SELL" if direction == "LONG" else "BUY",
-                quantity=quantity,
-                stop_price=position['stop_loss']
-            )
-            
-            # Profit target
-            target_order = place_limit_order(
-                ib=ib,
-                symbol=symbol,
-                action="SELL" if direction == "LONG" else "BUY",
-                quantity=quantity,
-                limit_price=position['profit_target']
-            )
-            
+            result = place_limit_tp_trail_bracket(ib, params)
             executed_orders.append({
                 'symbol': symbol,
-                'entry_order': entry_order,
-                'stop_order': stop_order,
-                'target_order': target_order
+                'ok': result.ok,
+                'parent_id': result.parent_id,
+                'stop_id': result.stop_id,
+                'degraded': result.degraded,
+                'message': result.message,
             })
-            
-            print(f"✓ {symbol}: Orders placed")
-            
+            print(f"{'✓' if result.ok else '✗'} {symbol}: {result.message}")
         except Exception as e:
             print(f"✗ {symbol}: Failed - {e}")
-    
+
     return executed_orders
 
 

@@ -1,3 +1,7 @@
+# TODO(migration): This 10s monolith is NOT the canonical execution path. The
+# canonical system is the src/arms/* bus architecture. This file is retained and
+# its P0 throughput bug fixed in this PR, but it is slated for retirement in a
+# dedicated follow-up PR once arms/* reaches feature parity. Do not extend it.
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -32,7 +36,9 @@ from src.signals.score_candidates import score_scan_results
 from src.risk.daily_pnl_manager import (
     record_session_start_equity, is_kill_switch_active, get_kill_switch_status
 )
-from src.risk.regime import get_regime, RegimeResult
+# RegimeState is the canonical regime snapshot; older code referenced the
+# non-existent name "RegimeResult" which crashed this module on import.
+from src.risk.regime import get_regime, RegimeState as RegimeResult
 from src.signals.signal_validator import (
     compute_candidate_metrics,
     passes_hyper_swing_filters,
@@ -75,8 +81,8 @@ BASE_RISK_PER_TRADE = 0.005
 CONVICTION_RISK_PER_TRADE = 0.0075
 BASE_MAX_TOTAL_OPEN_RISK = 0.02
 CONVICTION_MAX_TOTAL_OPEN_RISK = 0.045
-BASE_MAX_CONCURRENT_POSITIONS = 4
-CONVICTION_MAX_CONCURRENT_POSITIONS = 6
+BASE_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_MAX_CONCURRENT_POSITIONS", "10"))
+CONVICTION_MAX_CONCURRENT_POSITIONS = int(os.getenv("TRADE_LABS_CONVICTION_MAX_CONCURRENT_POSITIONS", "12"))
 MIN_CATALYST_SCORE = 60.0  # Catalyst score threshold for trading (tuned for higher candidate flow)
 
 # Phase 2: Unified score weights
@@ -125,9 +131,12 @@ BREADTH_SCAN_LIMIT = 15
 # Trade history for loss-streak tracking
 TRADES_FILE = Path("data/trade_history/trades.json")
 # ---- Bracket Throttling & Safety ----
-MAX_NEW_BRACKETS_PER_LOOP = 2           # Submit max 2 brackets per 10s loop
-COOLDOWN_SECONDS_PER_SYMBOL = 300       # Don't retry same symbol for 5 min
-BRACKET_COOLDOWN_SECONDS = int(os.getenv("TRADE_LABS_BRACKET_COOLDOWN_SECONDS", "20"))
+MAX_NEW_BRACKETS_PER_LOOP = int(os.getenv("TRADE_LABS_MAX_NEW_BRACKETS_PER_LOOP", "4"))
+# Loss-triggered cooldown: applied per-symbol ONLY after a LOSING exit on that
+# symbol (default 300s, configurable). Winning/flat exits do NOT trigger it.
+# The blanket 20s global bracket cooldown and the unconditional 5-min per-symbol
+# cooldown were removed — the daily kill-switch is the portfolio circuit breaker.
+LOSS_COOLDOWN_SECONDS = int(os.getenv("TRADE_LABS_LOSS_COOLDOWN_SECONDS", "300"))
 HYPER_RECHECK_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_SECONDS", "30"))
 HYPER_RECHECK_VOL_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_VOL_SECONDS", str(HYPER_RECHECK_SECONDS)))
 HYPER_RECHECK_VWAP_SECONDS = int(os.getenv("TRADE_LABS_HYPER_RECHECK_VWAP_SECONDS", str(HYPER_RECHECK_SECONDS)))
@@ -824,6 +833,64 @@ def load_closed_trades() -> List[Dict[str, float]]:
         return []
 
 
+def reconcile_tracking_after_reconnect(
+    ib: IB,
+    active: Set[str],
+    confirmed_fills: Set[str],
+    trail_active_symbols: Set[str],
+    stop_order_ids: Dict[str, int],
+) -> None:
+    """Re-sync in-memory tracking from a freshly-reconnected IB session.
+
+    After a reconnect, locally-tracked order ids belong to the OLD connection
+    and may be stale. This rebuilds:
+      - confirmed_fills / active  from ib.positions()
+      - stop_order_ids            from open STOP/TRAIL sell orders
+      - trail_active_symbols      from open TRAIL sell orders
+    """
+    try:
+        live_positions = {
+            p.contract.symbol
+            for p in ib.positions()
+            if getattr(p, "position", 0) != 0
+        }
+    except Exception:
+        live_positions = set()
+
+    # Positions are ground truth for what is actually open.
+    confirmed_fills.clear()
+    confirmed_fills.update(live_positions)
+    active.clear()
+    active.update(live_positions)
+
+    # Rebuild stop/trail tracking from open trades on the new connection.
+    stop_order_ids.clear()
+    trail_active_symbols.clear()
+    try:
+        open_trades = ib.openTrades()
+    except Exception:
+        open_trades = []
+    for tr in open_trades:
+        order = getattr(tr, "order", None)
+        contract = getattr(tr, "contract", None)
+        if order is None or contract is None:
+            continue
+        sym = getattr(contract, "symbol", None)
+        if not sym or getattr(order, "action", "") != "SELL":
+            continue
+        otype = getattr(order, "orderType", "")
+        if otype == "STP":
+            stop_order_ids[sym] = getattr(order, "orderId", 0)
+        elif otype == "TRAIL":
+            trail_active_symbols.add(sym)
+            stop_order_ids.setdefault(sym, getattr(order, "orderId", 0))
+
+    print(
+        f"[RECONNECT_SYNC] positions={sorted(live_positions)} "
+        f"stops={len(stop_order_ids)} trails_active={len(trail_active_symbols)}"
+    )
+
+
 def cancel_order_by_id(ib: IB, order_id: int) -> bool:
     if not order_id:
         return False
@@ -888,7 +955,7 @@ def main():
 
     print(f"\n{SYSTEM_NAME} → {HUMAN_NAME}: Live Loop (10s)")
     print(f"MODE={'PAPER' if is_paper() else 'LIVE'} BACKEND={execution_backend()} ARMED={is_armed()}\n")
-    print(f"[COOLDOWN] BRACKET_COOLDOWN_SECONDS={BRACKET_COOLDOWN_SECONDS}")
+    print(f"[COOLDOWN] LOSS_COOLDOWN_SECONDS={LOSS_COOLDOWN_SECONDS} (loss-triggered, per-symbol)")
     if ENABLE_BOUNCE_MODE:
         print(
             "[BOUNCE_CFG] "
@@ -953,6 +1020,10 @@ def main():
     # Track last bracket submission per symbol (for throttling)
     last_bracket_ts: Dict[str, float] = {}  # symbol -> timestamp of last bracket
     last_bracket_attempt_ts = 0.0
+    # Loss-triggered cooldown: symbol -> epoch ts until which re-entry is blocked
+    # (set only after a LOSING exit on that symbol).
+    loss_cooldown_until: Dict[str, float] = {}
+    seen_closed_trade_keys: Set[str] = set()
     last_hyper_reject_ts: Dict[str, float] = {}  # symbol -> timestamp of most recent hyper-filter reject
     last_hyper_reject_reason: Dict[str, str] = {}  # symbol -> last hyper-filter reject reason
     stop_order_ids: Dict[str, int] = {}
@@ -1027,837 +1098,869 @@ def main():
             now = time.time()
             armed = is_armed()
 
-            if not ib.isConnected():
-                print("[WARN] IB disconnected, reconnecting...")
-                try:
-                    ib.disconnect()
-                except Exception:
-                    pass
-                ib = connect_ib()
-                time.sleep(1.0)
-                continue
-
-            equity = get_equity(ib)
-            if equity <= 0:
-                print("[WARN] Equity unavailable; retrying next loop.")
-                _write_dashboard()
-                time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
-                continue
-            
-            # Record session start on first run or new trading day
-            current_session_date = datetime.now(timezone.utc).date()
-            if not session_started or last_session_date != current_session_date:
-                record_session_start_equity(equity)
-                session_started = True
-                last_session_date = current_session_date
-                print(f"[SESSION] Started with equity: ${equity:,.2f}")
-                if tracker.start_equity == 0.0:
-                    tracker.start_equity = equity
-
-            _dash_equity = equity
-
-            if session_peak_equity <= 0:
-                session_peak_equity = equity
-            else:
-                session_peak_equity = max(session_peak_equity, equity)
-
-            if trading_halted_for_day and halted_date != current_session_date:
-                trading_halted_for_day = False
-                halted_date = None
-
-            force_kill = os.getenv("TRADE_LABS_FORCE_KILL") == "1" and not force_kill_triggered
-            if force_kill or is_kill_switch_active(ib):
-                if not trading_halted_for_day:
-                    reason = "FORCE_KILL" if force_kill else "daily_loss_threshold"
-                    tracker.kill_switch_events.append({"reason": reason, "ts": datetime.now(timezone.utc).isoformat()})
-                    if force_kill:
-                        print("[KILL_SWITCH] Forced trigger via TRADE_LABS_FORCE_KILL=1.")
-                        force_kill_triggered = True
-                        try:
-                            os.environ.pop("TRADE_LABS_FORCE_KILL", None)
-                        except:
-                            pass
-                    print("[KILL_SWITCH] Triggered. Canceling orders and flattening positions.")
+            try:
+                if not ib.isConnected():
+                    print("[WARN] IB disconnected, reconnecting...")
                     try:
-                        print("[KILL_SWITCH] Canceling all open orders...")
-                        ib.reqGlobalCancel()
+                        ib.disconnect()
                     except Exception:
                         pass
-                    print("[KILL_SWITCH] Flattening positions...")
-                    close_positions_by_weakness(ib, armed)
-                    trading_halted_for_day = True
-                    halted_date = current_session_date
-                    print("[KILL_SWITCH] Trading halted for the day.")
-                time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
-                continue
-
-            if trading_halted_for_day:
-                time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
-                continue
-
-            closed_trades = load_closed_trades()
-            if len(closed_trades) > last_closed_trade_count:
-                if len(closed_trades) >= LOSS_STREAK_LOOKBACK:
-                    last_two = closed_trades[-LOSS_STREAK_LOOKBACK:]
-                    if all((t.get("pnl") or 0.0) < 0 for t in last_two):
-                        loss_streak_penalty_remaining = LOSS_STREAK_PENALTY_TRADES
-                last_closed_trade_count = len(closed_trades)
-
-            # ====== CATALYST HUNTING (PRIMARY - every 5 minutes) ======
-            catalyst_hunt_interval = 300  # Hunt catalysts every 5 minutes
-            catalyst_refreshed = False
-            if research_engine and ((now - last_catalyst_hunt_ts) >= catalyst_hunt_interval or not catalyst_candidates):
-                try:
-                    catalyst_hunt_results = research_engine.hunt_all_sources()
-                    catalyst_ranking = research_engine.scorer.rank_opportunities(
-                        catalyst_hunt_results,
-                        max_results=CATALYST_POOL_SIZE,
+                    ib = connect_ib()
+                    time.sleep(1.0)
+                    # P1: re-sync tracking from the NEW connection so stops/
+                    # trails/fills aren't tracked by stale ids after reconnect.
+                    reconcile_tracking_after_reconnect(
+                        ib, active, confirmed_fills,
+                        trail_active_symbols, stop_order_ids,
                     )
-                    catalyst_candidates = [opp.symbol for opp in catalyst_ranking[:10]]
-                    last_catalyst_hunt_ts = now
-                    catalyst_refreshed = True
-                    print(f"[CATALYST] Found {len(catalyst_candidates)} high-quality opportunities")
-                except Exception as e:
-                    print(f"[CATALYST] hunt error: {e}")
+                    continue
 
-            # ====== SCANNER HUNTING via ScanRotator + CandidatePool ======
-            if candidate_pool.size() < REFILL_THRESHOLD:
-                try:
-                    cached_scan = scan_rotator.next_scan(ib, limit=SCAN_LIMIT)
-                    last_scan_ts = now
-                    added = candidate_pool.add_many(cached_scan)
-                    print(f"[SCAN] refreshed: {len(cached_scan)} scanned, {added} new into pool")
-                    # Guard: if every symbol was already seen and pool is
-                    # still empty/below threshold, force-reset once so we
-                    # don't stall the loop.
-                    if added == 0 and candidate_pool.size() < REFILL_THRESHOLD:
-                        print("[POOL] refill produced 0 new symbols; resetting pool and retrying once")
-                        candidate_pool.clear()
-                        added = candidate_pool.add_many(cached_scan)
-                        print(f"[SCAN] retry: {added} symbols into pool after reset")
-                except Exception as e:
-                    print(f"[SCAN] error: {e}")
-
-            scan_batch = candidate_pool.pop_many(BATCH_SIZE)
-
-            # ====== BLEND SOURCES: CATALYST PRIMARY + SCANNER FALLBACK ======
-            # Priority: 1) Catalyst candidates, 2) Scanner results
-            scored = []
-
-            # Track scanned symbols
-            for s in scan_batch:
-                tracker.symbols_scanned.add(s.symbol if hasattr(s, 'symbol') else str(s))
-            for opp in catalyst_ranking:
-                tracker.symbols_scanned.add(opp.symbol)
+                equity = get_equity(ib)
+                if equity <= 0:
+                    print("[WARN] Equity unavailable; retrying next loop.")
+                    _write_dashboard()
+                    time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
+                    continue
             
-            # First: use catalyst ranking directly (already scored by catalyst scorer)
-            if catalyst_ranking:
-                # catalyst_ranking is already a list of CatalystScore objects sorted by score
-                # Validate contracts with IB before scoring
-                catalyst_contracts = []
-                if len(catalyst_ranking) > 0:
-                    rot = catalyst_rotation % len(catalyst_ranking)
-                    ranked_view = catalyst_ranking[rot:] + catalyst_ranking[:rot]
+                # Record session start on first run or new trading day
+                current_session_date = datetime.now(timezone.utc).date()
+                if not session_started or last_session_date != current_session_date:
+                    record_session_start_equity(equity)
+                    session_started = True
+                    last_session_date = current_session_date
+                    print(f"[SESSION] Started with equity: ${equity:,.2f}")
+                    if tracker.start_equity == 0.0:
+                        tracker.start_equity = equity
+
+                _dash_equity = equity
+
+                if session_peak_equity <= 0:
+                    session_peak_equity = equity
                 else:
-                    ranked_view = catalyst_ranking
-                
-                for opp in ranked_view[:CATALYST_TOP_N]:
-                    if opp.symbol in invalid_symbols:
-                        continue
-                    if opp.symbol in valid_contracts:
-                        c = valid_contracts[opp.symbol]
-                        c.catalyst_score = opp.combined_score
-                        catalyst_contracts.append(c)
-                        continue
+                    session_peak_equity = max(session_peak_equity, equity)
+
+                if trading_halted_for_day and halted_date != current_session_date:
+                    trading_halted_for_day = False
+                    halted_date = None
+
+                force_kill = os.getenv("TRADE_LABS_FORCE_KILL") == "1" and not force_kill_triggered
+                if force_kill or is_kill_switch_active(ib):
+                    if not trading_halted_for_day:
+                        reason = "FORCE_KILL" if force_kill else "daily_loss_threshold"
+                        tracker.kill_switch_events.append({"reason": reason, "ts": datetime.now(timezone.utc).isoformat()})
+                        if force_kill:
+                            print("[KILL_SWITCH] Forced trigger via TRADE_LABS_FORCE_KILL=1.")
+                            force_kill_triggered = True
+                            try:
+                                os.environ.pop("TRADE_LABS_FORCE_KILL", None)
+                            except:
+                                pass
+                        print("[KILL_SWITCH] Triggered. Canceling orders and flattening positions.")
+                        try:
+                            print("[KILL_SWITCH] Canceling all open orders...")
+                            ib.reqGlobalCancel()
+                        except Exception:
+                            pass
+                        print("[KILL_SWITCH] Flattening positions...")
+                        close_positions_by_weakness(ib, armed)
+                        trading_halted_for_day = True
+                        halted_date = current_session_date
+                        print("[KILL_SWITCH] Trading halted for the day.")
+                    time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
+                    continue
+
+                if trading_halted_for_day:
+                    time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
+                    continue
+
+                closed_trades = load_closed_trades()
+                if len(closed_trades) > last_closed_trade_count:
+                    if len(closed_trades) >= LOSS_STREAK_LOOKBACK:
+                        last_two = closed_trades[-LOSS_STREAK_LOOKBACK:]
+                        if all((t.get("pnl") or 0.0) < 0 for t in last_two):
+                            loss_streak_penalty_remaining = LOSS_STREAK_PENALTY_TRADES
+                    # Arm a per-symbol cooldown ONLY for newly-closed LOSING trades.
+                    for _ct in closed_trades:
+                        _key = f"{_ct.get('symbol')}|{_ct.get('exit_ts') or _ct.get('ts') or _ct.get('pnl')}"
+                        if _key in seen_closed_trade_keys:
+                            continue
+                        seen_closed_trade_keys.add(_key)
+                        _sym = _ct.get("symbol")
+                        if _sym and (_ct.get("pnl") or 0.0) < 0:
+                            loss_cooldown_until[_sym] = time.time() + LOSS_COOLDOWN_SECONDS
+                            print(f"[LOSS_COOLDOWN] {_sym}: armed for {LOSS_COOLDOWN_SECONDS}s after losing exit (pnl={_ct.get('pnl')})")
+                    last_closed_trade_count = len(closed_trades)
+
+                # ====== CATALYST HUNTING (PRIMARY - every 5 minutes) ======
+                catalyst_hunt_interval = 300  # Hunt catalysts every 5 minutes
+                catalyst_refreshed = False
+                if research_engine and ((now - last_catalyst_hunt_ts) >= catalyst_hunt_interval or not catalyst_candidates):
                     try:
-                        c = Stock(opp.symbol, "SMART", "USD")
-                        # Try to qualify - this validates the symbol exists with IB
-                        qualified = ib.qualifyContracts(c)
-                        
-                        if qualified:
-                            # Valid contract - use it
+                        catalyst_hunt_results = research_engine.hunt_all_sources()
+                        catalyst_ranking = research_engine.scorer.rank_opportunities(
+                            catalyst_hunt_results,
+                            max_results=CATALYST_POOL_SIZE,
+                        )
+                        catalyst_candidates = [opp.symbol for opp in catalyst_ranking[:10]]
+                        last_catalyst_hunt_ts = now
+                        catalyst_refreshed = True
+                        print(f"[CATALYST] Found {len(catalyst_candidates)} high-quality opportunities")
+                    except Exception as e:
+                        print(f"[CATALYST] hunt error: {e}")
+
+                # ====== SCANNER HUNTING via ScanRotator + CandidatePool ======
+                if candidate_pool.size() < REFILL_THRESHOLD:
+                    try:
+                        cached_scan = scan_rotator.next_scan(ib, limit=SCAN_LIMIT)
+                        last_scan_ts = now
+                        added = candidate_pool.add_many(cached_scan)
+                        print(f"[SCAN] refreshed: {len(cached_scan)} scanned, {added} new into pool")
+                        # Guard: if every symbol was already seen and pool is
+                        # still empty/below threshold, force-reset once so we
+                        # don't stall the loop.
+                        if added == 0 and candidate_pool.size() < REFILL_THRESHOLD:
+                            print("[POOL] refill produced 0 new symbols; resetting pool and retrying once")
+                            candidate_pool.clear()
+                            added = candidate_pool.add_many(cached_scan)
+                            print(f"[SCAN] retry: {added} symbols into pool after reset")
+                    except Exception as e:
+                        print(f"[SCAN] error: {e}")
+
+                scan_batch = candidate_pool.pop_many(BATCH_SIZE)
+
+                # ====== BLEND SOURCES: CATALYST PRIMARY + SCANNER FALLBACK ======
+                # Priority: 1) Catalyst candidates, 2) Scanner results
+                scored = []
+
+                # Track scanned symbols
+                for s in scan_batch:
+                    tracker.symbols_scanned.add(s.symbol if hasattr(s, 'symbol') else str(s))
+                for opp in catalyst_ranking:
+                    tracker.symbols_scanned.add(opp.symbol)
+            
+                # First: use catalyst ranking directly (already scored by catalyst scorer)
+                if catalyst_ranking:
+                    # catalyst_ranking is already a list of CatalystScore objects sorted by score
+                    # Validate contracts with IB before scoring
+                    catalyst_contracts = []
+                    if len(catalyst_ranking) > 0:
+                        rot = catalyst_rotation % len(catalyst_ranking)
+                        ranked_view = catalyst_ranking[rot:] + catalyst_ranking[:rot]
+                    else:
+                        ranked_view = catalyst_ranking
+                
+                    for opp in ranked_view[:CATALYST_TOP_N]:
+                        if opp.symbol in invalid_symbols:
+                            continue
+                        if opp.symbol in valid_contracts:
+                            c = valid_contracts[opp.symbol]
                             c.catalyst_score = opp.combined_score
                             catalyst_contracts.append(c)
-                            valid_contracts[opp.symbol] = c
-                        else:
-                            # Failed validation
+                            continue
+                        try:
+                            c = Stock(opp.symbol, "SMART", "USD")
+                            # Try to qualify - this validates the symbol exists with IB
+                            qualified = ib.qualifyContracts(c)
+                        
+                            if qualified:
+                                # Valid contract - use it
+                                c.catalyst_score = opp.combined_score
+                                catalyst_contracts.append(c)
+                                valid_contracts[opp.symbol] = c
+                            else:
+                                # Failed validation
+                                invalid_symbols.add(opp.symbol)
+                                if opp.symbol not in invalid_symbols_logged:
+                                    print(f"  [CATALYST REJECTED] {opp.symbol}: invalid contract")
+                                    invalid_symbols_logged.add(opp.symbol)
+                        except Exception as e:
+                            # Contract lookup failed
                             invalid_symbols.add(opp.symbol)
                             if opp.symbol not in invalid_symbols_logged:
-                                print(f"  [CATALYST REJECTED] {opp.symbol}: invalid contract")
+                                reason = str(e).strip() or "qualification failed"
+                                print(f"  [CATALYST REJECTED] {opp.symbol}: {reason}")
                                 invalid_symbols_logged.add(opp.symbol)
-                    except Exception as e:
-                        # Contract lookup failed
-                        invalid_symbols.add(opp.symbol)
-                        if opp.symbol not in invalid_symbols_logged:
-                            reason = str(e).strip() or "qualification failed"
-                            print(f"  [CATALYST REJECTED] {opp.symbol}: {reason}")
-                            invalid_symbols_logged.add(opp.symbol)
                 
-                scored.extend(catalyst_contracts)
-                if catalyst_refreshed:
-                    print(f"  [CATALYST SCORED] {len(catalyst_contracts)} candidates ready (catalyst score source)")
-                if catalyst_ranking:
-                    catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
+                    scored.extend(catalyst_contracts)
+                    if catalyst_refreshed:
+                        print(f"  [CATALYST SCORED] {len(catalyst_contracts)} candidates ready (catalyst score source)")
+                    if catalyst_ranking:
+                        catalyst_rotation = (catalyst_rotation + 1) % len(catalyst_ranking)
             
-            # Scanner supplement: score the current batch from the pool
-            # Only rescore when we have a fresh batch AND the interval has elapsed.
-            if scan_batch and (now - last_scan_score_ts) >= SCANNER_SCORE_INTERVAL_SECONDS:
-                last_scanner_scored = score_scan_results(ib, scan_batch, top_n=TRADE_TOP_N)
-                last_scan_score_ts = now
-                print(f"[SCAN] scored {len(scan_batch)} batch -> {len(last_scanner_scored)} passed")
+                # Scanner supplement: score the current batch from the pool
+                # Only rescore when we have a fresh batch AND the interval has elapsed.
+                if scan_batch and (now - last_scan_score_ts) >= SCANNER_SCORE_INTERVAL_SECONDS:
+                    last_scanner_scored = score_scan_results(ib, scan_batch, top_n=TRADE_TOP_N)
+                    last_scan_score_ts = now
+                    print(f"[SCAN] scored {len(scan_batch)} batch -> {len(last_scanner_scored)} passed")
 
-            scanner_scored = last_scanner_scored
-            if scanner_scored:
-                rot = scanner_rotation % len(scanner_scored)
-                scanner_ranked_view = scanner_scored[rot:] + scanner_scored[:rot]
-                scanner_rotation = (scanner_rotation + 1) % len(scanner_scored)
-            else:
-                scanner_ranked_view = scanner_scored
+                scanner_scored = last_scanner_scored
+                if scanner_scored:
+                    rot = scanner_rotation % len(scanner_scored)
+                    scanner_ranked_view = scanner_scored[rot:] + scanner_scored[:rot]
+                    scanner_rotation = (scanner_rotation + 1) % len(scanner_scored)
+                else:
+                    scanner_ranked_view = scanner_scored
 
-            # Dedup: don't include scanner results already in catalyst picks
-            catalyst_syms = set(s.symbol for s in scored)
-            scanner_only = [s for s in scanner_ranked_view if s.symbol not in catalyst_syms]
+                # Dedup: don't include scanner results already in catalyst picks
+                catalyst_syms = set(s.symbol for s in scored)
+                scanner_only = [s for s in scanner_ranked_view if s.symbol not in catalyst_syms]
 
-            scanner_slots = max(0, TRADE_TOP_N - len(scored))
-            scanner_added = scanner_only[:scanner_slots]
-            scored.extend(scanner_added)
+                scanner_slots = max(0, TRADE_TOP_N - len(scored))
+                scanner_added = scanner_only[:scanner_slots]
+                scored.extend(scanner_added)
 
-            if scanner_added:
-                print(f"  [SCANNER] Added {len(scanner_added)} diversity candidates")
+                if scanner_added:
+                    print(f"  [SCANNER] Added {len(scanner_added)} diversity candidates")
 
-            active = get_active_symbols(ib)
-            current_symbols = [c.symbol for c in scored]
+                active = get_active_symbols(ib)
+                current_symbols = [c.symbol for c in scored]
 
-            if (now - last_breadth_ts) >= BREADTH_CACHE_SECONDS or last_breadth_pct is None:
-                last_breadth_pct = get_scan_breadth_pct(ib, cached_scan)
-                last_breadth_source = "scan"
-                if last_breadth_pct is None:
-                    last_breadth_pct = get_market_breadth_pct()
-                    last_breadth_source = "yahoo" if last_breadth_pct is not None else "n/a"
-                last_breadth_ts = now
+                if (now - last_breadth_ts) >= BREADTH_CACHE_SECONDS or last_breadth_pct is None:
+                    last_breadth_pct = get_scan_breadth_pct(ib, cached_scan)
+                    last_breadth_source = "scan"
+                    if last_breadth_pct is None:
+                        last_breadth_pct = get_market_breadth_pct()
+                        last_breadth_source = "yahoo" if last_breadth_pct is not None else "n/a"
+                    last_breadth_ts = now
 
-            high_score_count = 0
-            earnings_high_conf_count = 0
-            if catalyst_ranking:
-                high_score_count = sum(1 for opp in catalyst_ranking if opp.combined_score >= 75)
-                earnings_high_conf_count = sum(
-                    1
-                    for opp in catalyst_ranking
-                    if "earnings" in opp.best_catalyst_types and opp.confidence >= 0.9
+                high_score_count = 0
+                earnings_high_conf_count = 0
+                if catalyst_ranking:
+                    high_score_count = sum(1 for opp in catalyst_ranking if opp.combined_score >= 75)
+                    earnings_high_conf_count = sum(
+                        1
+                        for opp in catalyst_ranking
+                        if "earnings" in opp.best_catalyst_types and opp.confidence >= 0.9
+                    )
+
+                # ====== REGIME FILTER (Phase 2) ======
+                regime = get_regime(ib, breadth_pct=last_breadth_pct)
+                _dash_regime = regime.regime
+
+                # Track regime changes
+                last_regime = tracker.regime_log[-1]["regime"] if tracker.regime_log else None
+                if regime.regime != last_regime:
+                    tracker.regime_log.append({"regime": regime.regime, "ts": datetime.now(timezone.utc).isoformat()})
+
+                breadth_trigger = (last_breadth_pct is not None) and (last_breadth_pct >= BREADTH_ADV_THRESHOLD)
+                conviction_mode = (
+                    (high_score_count >= 3
+                     or earnings_high_conf_count >= 2
+                     or breadth_trigger)
+                    and regime.regime != "RED"   # Never convict in RED
                 )
 
-            # ====== REGIME FILTER (Phase 2) ======
-            regime = get_regime(ib, breadth_pct=last_breadth_pct)
-            _dash_regime = regime.regime
+                # Build conviction reasons for audit trail
+                conviction_reasons = []
+                if high_score_count >= 3:
+                    conviction_reasons.append(f"high_scores={high_score_count}>=3")
+                if earnings_high_conf_count >= 2:
+                    conviction_reasons.append(f"earnings_conf={earnings_high_conf_count}>=2")
+                if breadth_trigger:
+                    conviction_reasons.append(f"breadth={last_breadth_pct*100:.1f}%>=65%")
 
-            # Track regime changes
-            last_regime = tracker.regime_log[-1]["regime"] if tracker.regime_log else None
-            if regime.regime != last_regime:
-                tracker.regime_log.append({"regime": regime.regime, "ts": datetime.now(timezone.utc).isoformat()})
+                risk_per_trade_pct = CONVICTION_RISK_PER_TRADE if conviction_mode else BASE_RISK_PER_TRADE
+                max_total_open_risk = CONVICTION_MAX_TOTAL_OPEN_RISK if conviction_mode else BASE_MAX_TOTAL_OPEN_RISK
+                max_concurrent_positions = (
+                    CONVICTION_MAX_CONCURRENT_POSITIONS if conviction_mode else BASE_MAX_CONCURRENT_POSITIONS
+                )
 
-            breadth_trigger = (last_breadth_pct is not None) and (last_breadth_pct >= BREADTH_ADV_THRESHOLD)
-            conviction_mode = (
-                (high_score_count >= 3
-                 or earnings_high_conf_count >= 2
-                 or breadth_trigger)
-                and regime.regime != "RED"   # Never convict in RED
-            )
+                # Regime scaling
+                if regime.regime == "YELLOW":
+                    risk_per_trade_pct *= YELLOW_RISK_REDUCTION
+                    max_concurrent_positions = max(1, max_concurrent_positions - YELLOW_POSITION_PENALTY)
 
-            # Build conviction reasons for audit trail
-            conviction_reasons = []
-            if high_score_count >= 3:
-                conviction_reasons.append(f"high_scores={high_score_count}>=3")
-            if earnings_high_conf_count >= 2:
-                conviction_reasons.append(f"earnings_conf={earnings_high_conf_count}>=2")
-            if breadth_trigger:
-                conviction_reasons.append(f"breadth={last_breadth_pct*100:.1f}%>=65%")
+                drawdown_pct = 0.0
+                if session_peak_equity > 0:
+                    drawdown_pct = max(0.0, (session_peak_equity - equity) / session_peak_equity)
+                    if drawdown_pct >= PEAK_DRAWDOWN_THRESHOLD:
+                        risk_per_trade_pct = min(risk_per_trade_pct, PEAK_DRAWDOWN_RISK_PCT)
 
-            risk_per_trade_pct = CONVICTION_RISK_PER_TRADE if conviction_mode else BASE_RISK_PER_TRADE
-            max_total_open_risk = CONVICTION_MAX_TOTAL_OPEN_RISK if conviction_mode else BASE_MAX_TOTAL_OPEN_RISK
-            max_concurrent_positions = (
-                CONVICTION_MAX_CONCURRENT_POSITIONS if conviction_mode else BASE_MAX_CONCURRENT_POSITIONS
-            )
+                if loss_streak_penalty_remaining > 0:
+                    risk_per_trade_pct *= LOSS_STREAK_RISK_REDUCTION
 
-            # Regime scaling
-            if regime.regime == "YELLOW":
-                risk_per_trade_pct *= YELLOW_RISK_REDUCTION
-                max_concurrent_positions = max(1, max_concurrent_positions - YELLOW_POSITION_PENALTY)
-
-            drawdown_pct = 0.0
-            if session_peak_equity > 0:
-                drawdown_pct = max(0.0, (session_peak_equity - equity) / session_peak_equity)
-                if drawdown_pct >= PEAK_DRAWDOWN_THRESHOLD:
-                    risk_per_trade_pct = min(risk_per_trade_pct, PEAK_DRAWDOWN_RISK_PCT)
-
-            if loss_streak_penalty_remaining > 0:
-                risk_per_trade_pct *= LOSS_STREAK_RISK_REDUCTION
-
-            # Refresh ATR cache for scored symbols (every 10 min per symbol)
-            for cnd in scored:
-                sym = cnd.symbol
-                last_t = atr_cache_ts.get(sym, 0.0)
-                if (now - last_t) >= ATR_CACHE_SECONDS or sym not in atr_cache:
-                    try:
-                        df_d = get_daily_30d(ib, sym)
-                        atr_cache[sym] = atr14_from_daily(df_d)
-                        atr_cache_ts[sym] = now
-                    except Exception:
-                        atr_cache[sym] = atr_cache.get(sym, 0.0)
-
-            # ── Fill detection: upgrade ORDER_PLACED → POSITION_OPEN ──
-            newly_filled = get_filled_symbols(ib) - confirmed_fills
-            for sym in newly_filled:
-                confirmed_fills.add(sym)
-                # Find entry price from IB position avgCost
-                _fill_entry = 0.0
-                _fill_qty = 0
-                for p in ib.positions():
-                    if p.contract.symbol == sym and p.position != 0:
-                        _fill_entry = float(getattr(p, "avgCost", 0.0) or 0.0)
-                        _fill_qty = abs(int(p.position))
-                        break
-                tracker.positions_opened.append({
-                    "symbol": sym, "qty": _fill_qty,
-                    "entry": round(_fill_entry, 2),
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                })
-                lifecycle.emit(OrderEvent.ORDER_FILLED, sym,
-                              qty=_fill_qty, entry_price=round(_fill_entry, 2),
-                              message="confirmed fill from IB positions")
-                lifecycle.emit(OrderEvent.POSITION_OPEN, sym,
-                              qty=_fill_qty, entry_price=round(_fill_entry, 2))
-                dist_analyzer.record_fill(sym, _fill_entry, _fill_qty)
-                journal.record_fill(sym, entry_fill=round(_fill_entry, 2),
-                                    qty=_fill_qty)
-                print(f"[FILL] {sym}: POSITION_OPEN confirmed — qty={_fill_qty} entry=${_fill_entry:.2f}")
-
-            if (now - last_trail_check_ts) >= TRAIL_CHECK_SECONDS:
-                last_trail_check_ts = now
-                for p in ib.positions():
-                    if p.position <= 0:
-                        continue
-                    sym = p.contract.symbol
-                    
-                    # Skip if already activated
-                    if sym in trail_active_symbols:
-                        continue
-
-                    # Get or compute ATR
-                    atr = atr_cache.get(sym, 0.0)
-                    if atr <= 0:
+                # Refresh ATR cache for scored symbols (every 10 min per symbol)
+                for cnd in scored:
+                    sym = cnd.symbol
+                    last_t = atr_cache_ts.get(sym, 0.0)
+                    if (now - last_t) >= ATR_CACHE_SECONDS or sym not in atr_cache:
                         try:
                             df_d = get_daily_30d(ib, sym)
-                            atr = atr14_from_daily(df_d)
-                            atr_cache[sym] = atr
+                            atr_cache[sym] = atr14_from_daily(df_d)
+                            atr_cache_ts[sym] = now
+                        except Exception:
+                            atr_cache[sym] = atr_cache.get(sym, 0.0)
+
+                # ── Fill detection: upgrade ORDER_PLACED → POSITION_OPEN ──
+                newly_filled = get_filled_symbols(ib) - confirmed_fills
+                for sym in newly_filled:
+                    confirmed_fills.add(sym)
+                    # Find entry price from IB position avgCost
+                    _fill_entry = 0.0
+                    _fill_qty = 0
+                    for p in ib.positions():
+                        if p.contract.symbol == sym and p.position != 0:
+                            _fill_entry = float(getattr(p, "avgCost", 0.0) or 0.0)
+                            _fill_qty = abs(int(p.position))
+                            break
+                    tracker.positions_opened.append({
+                        "symbol": sym, "qty": _fill_qty,
+                        "entry": round(_fill_entry, 2),
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+                    lifecycle.emit(OrderEvent.ORDER_FILLED, sym,
+                                  qty=_fill_qty, entry_price=round(_fill_entry, 2),
+                                  message="confirmed fill from IB positions")
+                    lifecycle.emit(OrderEvent.POSITION_OPEN, sym,
+                                  qty=_fill_qty, entry_price=round(_fill_entry, 2))
+                    dist_analyzer.record_fill(sym, _fill_entry, _fill_qty)
+                    journal.record_fill(sym, entry_fill=round(_fill_entry, 2),
+                                        qty=_fill_qty)
+                    print(f"[FILL] {sym}: POSITION_OPEN confirmed — qty={_fill_qty} entry=${_fill_entry:.2f}")
+
+                if (now - last_trail_check_ts) >= TRAIL_CHECK_SECONDS:
+                    last_trail_check_ts = now
+                    for p in ib.positions():
+                        if p.position <= 0:
+                            continue
+                        sym = p.contract.symbol
+                    
+                        # Skip if already activated
+                        if sym in trail_active_symbols:
+                            continue
+
+                        # Get or compute ATR
+                        atr = atr_cache.get(sym, 0.0)
+                        if atr <= 0:
+                            try:
+                                df_d = get_daily_30d(ib, sym)
+                                atr = atr14_from_daily(df_d)
+                                atr_cache[sym] = atr
+                            except Exception:
+                                continue
+
+                        entry_price = float(getattr(p, "avgCost", 0.0) or 0.0)
+                        if entry_price <= 0:
+                            continue
+
+                        # Use 1m bars for price (not snapshot) to avoid NaN
+                        try:
+                            current_px = get_recent_price_1m(ib, sym)
                         except Exception:
                             continue
 
-                    entry_price = float(getattr(p, "avgCost", 0.0) or 0.0)
-                    if entry_price <= 0:
-                        continue
-
-                    # Use 1m bars for price (not snapshot) to avoid NaN
-                    try:
-                        current_px = get_recent_price_1m(ib, sym)
-                    except Exception:
-                        continue
-
-                    activation_px = entry_price + (TRAIL_ACTIVATE_ATR * atr)
+                        activation_px = entry_price + (TRAIL_ACTIVATE_ATR * atr)
                     
-                    # Check if trail should be activated
-                    if current_px >= activation_px:
-                        # Activate trail
-                        trail_amt = atr * TRAIL_ATR_MULT
-                        stop_id = stop_order_ids.get(sym)
-                        if stop_id:
-                            cancel_order_by_id(ib, stop_id)
+                        # Check if trail should be activated
+                        if current_px >= activation_px:
+                            # Activate trail
+                            trail_amt = atr * TRAIL_ATR_MULT
+                            stop_id = stop_order_ids.get(sym)
+                            if stop_id:
+                                cancel_order_by_id(ib, stop_id)
 
-                        qty = abs(int(p.position))
-                        if not armed:
-                            print(f"[SIM] Activate trail {sym} qty={qty} trail=${trail_amt:.2f}")
-                            trail_active_symbols.add(sym)
-                            TRAIL_STATE[sym] = "activated"
+                            qty = abs(int(p.position))
+                            if not armed:
+                                print(f"[SIM] Activate trail {sym} qty={qty} trail=${trail_amt:.2f}")
+                                trail_active_symbols.add(sym)
+                                TRAIL_STATE[sym] = "activated"
+                                continue
+
+                            res = place_trailing_stop(ib, sym, qty, trail_amt, tif="DAY")
+                            if res.ok:
+                                trail_active_symbols.add(sym)
+                                TRAIL_STATE[sym] = "activated"
+                                if sym not in TRAIL_LOGGED:
+                                    tracker.trail_activations.append({
+                                        "symbol": sym, "trail_amt": round(trail_amt, 2),
+                                        "ts": datetime.now(timezone.utc).isoformat(),
+                                    })
+                                    lifecycle.emit(OrderEvent.TRAIL_ACTIVATED, sym,
+                                                  trail_amount=round(trail_amt, 2),
+                                                  trail_id=res.trail_id)
+                                    journal.record_trail_activated(
+                                        sym, trail_amount=round(trail_amt, 2),
+                                        trail_id=res.trail_id)
+                                    TRAIL_LOGGED.add(sym)
+                        else:
+                            # Trail not yet activated - log PENDING once
+                            if TRAIL_STATE.get(sym) != "pending":
+                                TRAIL_STATE[sym] = "pending"
+                                profit_pct = ((current_px - entry_price) / entry_price) * 100
+                                print(
+                                    f"[TRAIL_PENDING] {sym} price=${current_px:.2f} entry=${entry_price:.2f} "
+                                    f"(+{profit_pct:.1f}%) activate_at=${activation_px:.2f}"
+                                )
+
+                open_risk_pct, filled_risk_pct, pending_risk_pct = compute_open_risk_pct(ib, equity, atr_cache)
+                _n_pos = len([p for p in ib.positions() if p.position != 0])
+                _n_wrk = len([t for t in ib.openTrades() if t.orderStatus.status in ('PreSubmitted', 'Submitted')])
+                _dash_open_risk, _dash_filled_risk, _dash_pending_risk = open_risk_pct, filled_risk_pct, pending_risk_pct
+                _dash_n_pos, _dash_n_wrk = _n_pos, _n_wrk
+                tracker.update_risk_watermarks(open_risk_pct, filled_risk_pct, pending_risk_pct, _n_pos, _n_wrk)
+
+                # ── Lifecycle: poll IB order status transitions ──
+                try:
+                    lifecycle.poll_order_status(ib.openTrades())
+                except Exception:
+                    pass
+
+                if open_risk_pct >= max_total_open_risk:
+                    if (now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS:
+                        print(f"Max open risk reached: {open_risk_pct:.3f} (filled={filled_risk_pct:.3f} pending={pending_risk_pct:.3f}) >= {max_total_open_risk:.3f}. No new trades.")
+                        last_print_ts = now
+                    _write_dashboard()
+                    time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
+                    continue
+
+                should_print = (current_symbols != last_symbols) or ((now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS)
+
+                # Pre-compute SPY momentum once for all candidates
+                _spy_df = fetch_spy_5m(ib)
+                _spy_mom_30m = calc_momentum(_spy_df, 30) if _spy_df is not None else 0.0
+
+                # Dashboard/heartbeat printing is gated by should_print to avoid
+                # log spam. Candidate EVALUATION below runs EVERY loop iteration
+                # (de-nested from should_print) so entry decisions are not throttled
+                # to ~1/min by the print cadence.
+                if should_print:
+                    engine_status = "🎯 CATALYST PRIMARY" if research_engine else "📊 SCANNER"
+                    if last_breadth_pct is not None:
+                        breadth_pct_display = f"{last_breadth_pct*100:.1f}% ({last_breadth_source})"
+                    else:
+                        breadth_pct_display = "n/a"
+                    mode_label = "CONVICTION" if conviction_mode else "BASE"
+                    conviction_audit = f" [{', '.join(conviction_reasons)}]" if conviction_mode else ""
+                    regime_tag = f"regime={regime.regime}"
+                    if regime.reasons:
+                        regime_tag += f" [{', '.join(regime.reasons[:2])}]"
+                    print(
+                        f"\n--- Loop --- ARMED={armed} mode={mode_label}{conviction_audit} {regime_tag} "
+                        f"equity={equity:,.0f} risk={open_risk_pct:.3f}(filled={filled_risk_pct:.3f}+pending={pending_risk_pct:.3f}) active={len(active)} "
+                        f"breadth={breadth_pct_display} {engine_status}"
+                    )
+                    # ====== REGIME GATE: RED → skip new entries ======
+                    if regime.regime == "RED":
+                        print(f"[REGIME] RED — no new entries. Reasons: {', '.join(regime.reasons)}")
+
+                brackets_submitted_this_loop = 0  # Throttle: max per loop
+
+                if True:
+                    for cand in scored:
+                        sym = cand.symbol
+                        tracker.candidates_checked += 1
+
+                        if sym in invalid_symbols:
                             continue
 
-                        res = place_trailing_stop(ib, sym, qty, trail_amt, tif="DAY")
-                        if res.ok:
-                            trail_active_symbols.add(sym)
-                            TRAIL_STATE[sym] = "activated"
-                            if sym not in TRAIL_LOGGED:
-                                tracker.trail_activations.append({
-                                    "symbol": sym, "trail_amt": round(trail_amt, 2),
-                                    "ts": datetime.now(timezone.utc).isoformat(),
-                                })
-                                lifecycle.emit(OrderEvent.TRAIL_ACTIVATED, sym,
-                                              trail_amount=round(trail_amt, 2),
-                                              trail_id=res.trail_id)
-                                journal.record_trail_activated(
-                                    sym, trail_amount=round(trail_amt, 2),
-                                    trail_id=res.trail_id)
-                                TRAIL_LOGGED.add(sym)
-                    else:
-                        # Trail not yet activated - log PENDING once
-                        if TRAIL_STATE.get(sym) != "pending":
-                            TRAIL_STATE[sym] = "pending"
-                            profit_pct = ((current_px - entry_price) / entry_price) * 100
-                            print(
-                                f"[TRAIL_PENDING] {sym} price=${current_px:.2f} entry=${entry_price:.2f} "
-                                f"(+{profit_pct:.1f}%) activate_at=${activation_px:.2f}"
-                            )
+                        # Skip if already active
+                        if sym in active:
+                            continue
 
-            open_risk_pct, filled_risk_pct, pending_risk_pct = compute_open_risk_pct(ib, equity, atr_cache)
-            _n_pos = len([p for p in ib.positions() if p.position != 0])
-            _n_wrk = len([t for t in ib.openTrades() if t.orderStatus.status in ('PreSubmitted', 'Submitted')])
-            _dash_open_risk, _dash_filled_risk, _dash_pending_risk = open_risk_pct, filled_risk_pct, pending_risk_pct
-            _dash_n_pos, _dash_n_wrk = _n_pos, _n_wrk
-            tracker.update_risk_watermarks(open_risk_pct, filled_risk_pct, pending_risk_pct, _n_pos, _n_wrk)
+                        # Skip recently hyper-rejected symbols to avoid re-check spam every loop
+                        last_hs_reject = last_hyper_reject_ts.get(sym, 0.0)
+                        last_hs_reason = last_hyper_reject_reason.get(sym, "")
+                        recheck_seconds = HYPER_RECHECK_SECONDS
+                        if "price below VWAP" in last_hs_reason:
+                            recheck_seconds = HYPER_RECHECK_VWAP_SECONDS
+                        elif "vol_accel" in last_hs_reason:
+                            recheck_seconds = HYPER_RECHECK_VOL_SECONDS
+                        elif " > max " in last_hs_reason:
+                            recheck_seconds = HYPER_RECHECK_PRICECAP_SECONDS
 
-            # ── Lifecycle: poll IB order status transitions ──
-            try:
-                lifecycle.poll_order_status(ib.openTrades())
-            except Exception:
-                pass
+                        if (now - last_hs_reject) < recheck_seconds:
+                            continue
 
-            if open_risk_pct >= max_total_open_risk:
-                if (now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS:
-                    print(f"Max open risk reached: {open_risk_pct:.3f} (filled={filled_risk_pct:.3f} pending={pending_risk_pct:.3f}) >= {max_total_open_risk:.3f}. No new trades.")
-                    last_print_ts = now
-                _write_dashboard()
-                time.sleep(max(0.0, LOOP_SECONDS - (time.time() - loop_start)))
-                continue
+                        # Regime RED: block new entries entirely
+                        if regime.regime == "RED":
+                            break
 
-            should_print = (current_symbols != last_symbols) or ((now - last_print_ts) >= PRINT_HEARTBEAT_SECONDS)
+                        # Skip if max positions reached
+                        if len(active) >= max_concurrent_positions:
+                            print("Max concurrent positions reached.")
+                            break
 
-            # Pre-compute SPY momentum once for all candidates
-            _spy_df = fetch_spy_5m(ib)
-            _spy_mom_30m = calc_momentum(_spy_df, 30) if _spy_df is not None else 0.0
+                        # ====== SCORE THRESHOLD CHECK (CATALYST ONLY) ======
+                        cat_score = getattr(cand, 'catalyst_score', None) or 0.0
+                        if cat_score < MIN_CATALYST_SCORE:
+                            continue
 
-            if should_print:
-                engine_status = "🎯 CATALYST PRIMARY" if research_engine else "📊 SCANNER"
-                if last_breadth_pct is not None:
-                    breadth_pct_display = f"{last_breadth_pct*100:.1f}% ({last_breadth_source})"
-                else:
-                    breadth_pct_display = "n/a"
-                mode_label = "CONVICTION" if conviction_mode else "BASE"
-                conviction_audit = f" [{', '.join(conviction_reasons)}]" if conviction_mode else ""
-                regime_tag = f"regime={regime.regime}"
-                if regime.reasons:
-                    regime_tag += f" [{', '.join(regime.reasons[:2])}]"
-                print(
-                    f"\n--- Loop --- ARMED={armed} mode={mode_label}{conviction_audit} {regime_tag} "
-                    f"equity={equity:,.0f} risk={open_risk_pct:.3f}(filled={filled_risk_pct:.3f}+pending={pending_risk_pct:.3f}) active={len(active)} "
-                    f"breadth={breadth_pct_display} {engine_status}"
-                )
+                        # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
+                        is_valid, reason = is_valid_stock_contract(ib, sym, valid_contracts=valid_contracts)
+                        if not is_valid:
+                            if sym not in invalid_symbols_logged:
+                                print(f"[REJECT] {sym}: not tradeable ({reason})")
+                                invalid_symbols_logged.add(sym)
+                            invalid_symbols.add(sym)
+                            continue
 
-                brackets_submitted_this_loop = 0  # Throttle: max 1 per loop
-                
-                # ====== REGIME GATE: RED → skip new entries ======
-                if regime.regime == "RED":
-                    print(f"[REGIME] RED — no new entries. Reasons: {', '.join(regime.reasons)}")
+                        # ====== QUANT VERIFICATION (Phase 2) ======
+                        try:
+                            qm = compute_candidate_metrics(ib, sym, spy_mom_30m=_spy_mom_30m)
+                        except Exception as e:
+                            print(f"[SKIP] {sym}: quant metrics failed ({e})")
+                            continue
 
-                for cand in scored:
-                    sym = cand.symbol
-                    tracker.candidates_checked += 1
+                        if not qm.ok:
+                            print(f"[SKIP] {sym}: {qm.error}")
+                            continue
 
-                    if sym in invalid_symbols:
-                        continue
+                        dist_analyzer.record_checked(sym, cat_score, qm)
 
-                    # Skip if already active
-                    if sym in active:
-                        continue
-
-                    # Skip recently hyper-rejected symbols to avoid re-check spam every loop
-                    last_hs_reject = last_hyper_reject_ts.get(sym, 0.0)
-                    last_hs_reason = last_hyper_reject_reason.get(sym, "")
-                    recheck_seconds = HYPER_RECHECK_SECONDS
-                    if "price below VWAP" in last_hs_reason:
-                        recheck_seconds = HYPER_RECHECK_VWAP_SECONDS
-                    elif "vol_accel" in last_hs_reason:
-                        recheck_seconds = HYPER_RECHECK_VOL_SECONDS
-                    elif " > max " in last_hs_reason:
-                        recheck_seconds = HYPER_RECHECK_PRICECAP_SECONDS
-
-                    if (now - last_hs_reject) < recheck_seconds:
-                        continue
-
-                    # Regime RED: block new entries entirely
-                    if regime.regime == "RED":
-                        break
-
-                    # Skip if max positions reached
-                    if len(active) >= max_concurrent_positions:
-                        print("Max concurrent positions reached.")
-                        break
-
-                    # ====== SCORE THRESHOLD CHECK (CATALYST ONLY) ======
-                    cat_score = getattr(cand, 'catalyst_score', None) or 0.0
-                    if cat_score < MIN_CATALYST_SCORE:
-                        continue
-
-                    # ====== FIX B: UNIVERSE FILTER (STOCKS ONLY) ======
-                    is_valid, reason = is_valid_stock_contract(ib, sym, valid_contracts=valid_contracts)
-                    if not is_valid:
-                        if sym not in invalid_symbols_logged:
-                            print(f"[REJECT] {sym}: not tradeable ({reason})")
-                            invalid_symbols_logged.add(sym)
-                        invalid_symbols.add(sym)
-                        continue
-
-                    # ====== QUANT VERIFICATION (Phase 2) ======
-                    try:
-                        qm = compute_candidate_metrics(ib, sym, spy_mom_30m=_spy_mom_30m)
-                    except Exception as e:
-                        print(f"[SKIP] {sym}: quant metrics failed ({e})")
-                        continue
-
-                    if not qm.ok:
-                        print(f"[SKIP] {sym}: {qm.error}")
-                        continue
-
-                    dist_analyzer.record_checked(sym, cat_score, qm)
-
-                    # ---- Hyper-swing gates ----
-                    hs_cfg = dict(
-                        PRICE_MIN=CFG_PRICE_MIN,
-                        PRICE_MAX=CFG_PRICE_MAX,
-                        MIN_ATR_PCT=MIN_ATR_PCT,
-                        MIN_ADV20_DOLLARS=MIN_ADV20_DOLLARS,
-                        MIN_VOLUME_ACCEL=MIN_VOLUME_ACCEL,
-                        MIN_RS_VS_SPY=MIN_RS_VS_SPY,
-                        REQUIRE_ABOVE_VWAP=True,
-                        PRICE_MAX_ALLOWLIST=PRICE_MAX_ALLOWLIST,
-                    )
-                    hs_pass, hs_reason = passes_hyper_swing_filters(qm, config=hs_cfg)
-                    gate_tag = "MOMENTUM"
-                    gate_reason = hs_reason
-                    gate_pass = hs_pass
-
-                    bounce_pass = False
-                    bounce_reason = ""
-                    if not hs_pass and ENABLE_BOUNCE_MODE and regime.regime in ("GREEN", "YELLOW"):
-                        bounce_reject_reasons = []
-                        playbook_sample = max(0, int(getattr(qm, "playbook_sample_size_5d", 0) or 0))
-
-                        if playbook_sample < BOUNCE_MIN_SAMPLE_SIZE:
-                            # Informational only — log but do NOT gate.
-                            # Fresh system has zero history; blocking bounce on sample size
-                            # makes the fallback path permanently unreachable.
-                            print(
-                                f"[BOUNCE_INFO] {sym}: playbook_n {playbook_sample} < min {BOUNCE_MIN_SAMPLE_SIZE} "
-                                f"(informational — not gating)")
-
-                        if qm.price < CFG_PRICE_MIN:
-                            bounce_reject_reasons.append(f"price ${qm.price:.2f} < min ${CFG_PRICE_MIN}")
-                        if qm.price > CFG_PRICE_MAX and sym not in PRICE_MAX_ALLOWLIST:
-                            bounce_reject_reasons.append(f"price ${qm.price:.2f} > max ${CFG_PRICE_MAX}")
-                        if qm.atr_percent < MIN_ATR_PCT:
-                            bounce_reject_reasons.append(f"atr% {qm.atr_percent:.3f} < {MIN_ATR_PCT}")
-                        if qm.adv20_dollars < MIN_ADV20_DOLLARS:
-                            bounce_reject_reasons.append(
-                                f"adv20 ${qm.adv20_dollars/1e6:.1f}M < ${MIN_ADV20_DOLLARS/1e6:.0f}M"
-                            )
-                        if qm.playbook_win_rate_5d < BOUNCE_MIN_PLAYBOOK_WIN_RATE:
-                            bounce_reject_reasons.append(
-                                f"playbook_wr {qm.playbook_win_rate_5d*100:.1f}% < {BOUNCE_MIN_PLAYBOOK_WIN_RATE*100:.1f}%"
-                            )
-                        if qm.playbook_expectancy_5d < BOUNCE_MIN_PLAYBOOK_EXPECTANCY:
-                            bounce_reject_reasons.append(
-                                f"playbook_exp {qm.playbook_expectancy_5d*100:+.2f}% < {BOUNCE_MIN_PLAYBOOK_EXPECTANCY*100:+.2f}%"
-                            )
-                        if qm.playbook_score < BOUNCE_MIN_PLAYBOOK_SCORE:
-                            bounce_reject_reasons.append(
-                                f"playbook_score {qm.playbook_score:.1f} < {BOUNCE_MIN_PLAYBOOK_SCORE:.1f}"
-                            )
-                        if abs(min(0.0, qm.playbook_mae_5d)) > BOUNCE_MAX_MAE_ABS:
-                            bounce_reject_reasons.append(
-                                f"playbook_mae {qm.playbook_mae_5d*100:+.2f}% worse than -{BOUNCE_MAX_MAE_ABS*100:.2f}%"
-                            )
-
-                        if not bounce_reject_reasons:
-                            bounce_pass = True
-                            bounce_reason = (
-                                f"[BOUNCE_PASS] {sym}: "
-                                f"wr={qm.playbook_win_rate_5d*100:.1f}% exp={qm.playbook_expectancy_5d*100:+.2f}% "
-                                f"score={qm.playbook_score:.1f} mae={qm.playbook_mae_5d*100:+.2f}% n={playbook_sample} "
-                                f"atr%={qm.atr_percent*100:.2f}% adv=${qm.adv20_dollars/1e6:.0f}M regime={regime.regime}"
-                            )
-                        else:
-                            bounce_reason = f"[BOUNCE_REJECT] {' | '.join(bounce_reject_reasons)}"
-
-                    if not hs_pass and bounce_pass:
-                        gate_tag = "BOUNCE"
-                        gate_reason = bounce_reason
-                        gate_pass = True
-
-                    if not gate_pass:
-                        last_hyper_reject_ts[sym] = now
-                        last_hyper_reject_reason[sym] = f"{hs_reason} || {bounce_reason}" if bounce_reason else hs_reason
-                        tracker.hyper_rejections.append({"symbol": sym, "reason": hs_reason})
-                        print(f"[HYPER_FILTER] {sym}: {hs_reason}")
-                        if bounce_reason:
-                            tracker.bounce_rejections.append({"symbol": sym, "reason": bounce_reason})
-                            print(f"[BOUNCE_FILTER] {sym}: {bounce_reason}")
-                        continue
-                    last_hyper_reject_ts.pop(sym, None)
-                    last_hyper_reject_reason.pop(sym, None)
-                    print(gate_reason)
-
-                    # ---- Unified score ----
-                    unified = (UNIFIED_CATALYST_WEIGHT * cat_score
-                               + UNIFIED_QUANT_WEIGHT * qm.quant_score)
-                    if gate_tag == "BOUNCE":
-                        required_unified = BOUNCE_MIN_UNIFIED_SCORE
-                    else:
-                        required_unified = CONVICTION_MIN_UNIFIED_SCORE if conviction_mode else BASE_MIN_UNIFIED_SCORE
-                    if unified < required_unified:
-                        tracker.score_rejections.append({
-                            "symbol": sym,
-                            "reason": f"unified {unified:.1f} < {required_unified:.1f} ({gate_tag})",
-                        })
-                        print(
-                            f"[SCORE] {sym}: unified={unified:.1f} < {required_unified:.1f} "
-                            f"(mode={gate_tag} cat={cat_score:.0f} quant={qm.quant_score:.0f})"
+                        # ---- Hyper-swing gates ----
+                        hs_cfg = dict(
+                            PRICE_MIN=CFG_PRICE_MIN,
+                            PRICE_MAX=CFG_PRICE_MAX,
+                            MIN_ATR_PCT=MIN_ATR_PCT,
+                            MIN_ADV20_DOLLARS=MIN_ADV20_DOLLARS,
+                            MIN_VOLUME_ACCEL=MIN_VOLUME_ACCEL,
+                            MIN_RS_VS_SPY=MIN_RS_VS_SPY,
+                            REQUIRE_ABOVE_VWAP=True,
+                            PRICE_MAX_ALLOWLIST=PRICE_MAX_ALLOWLIST,
                         )
-                        continue
+                        hs_pass, hs_reason = passes_hyper_swing_filters(qm, config=hs_cfg)
+                        gate_tag = "MOMENTUM"
+                        gate_reason = hs_reason
+                        gate_pass = hs_pass
 
-                    # ---- Candidate summary ----
-                    dist_analyzer.record_signal(sym, unified, cat_score,
-                                               qm.quant_score, gate_tag, qm)
-                    tracker.signals.append({
-                        "symbol": sym, "unified_score": round(unified, 1),
-                        "catalyst_score": round(cat_score, 0),
-                        "quant_score": round(qm.quant_score, 0),
-                        "gate": gate_tag,
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-                    lifecycle.emit(OrderEvent.SIGNAL_SCORE, sym,
-                                  unified_score=round(unified, 1),
-                                  catalyst_score=round(cat_score, 0),
-                                  quant_score=round(qm.quant_score, 0),
-                                  gate=gate_tag)
-                    journal.create_trade_record(
-                        sym,
-                        unified_score=round(unified, 1),
-                        catalyst_score=round(cat_score, 0),
-                        quant_score=round(qm.quant_score, 0),
-                        gate_type=gate_tag,
-                        vol_accel=round(qm.volume_accel, 3),
-                        atr_pct=round(qm.atr_percent, 6),
-                        rs_30m_delta=round(qm.rel_strength_vs_spy, 6),
-                        momentum_30m=round(qm.momentum_30m, 6),
-                        adv20_dollars=round(qm.adv20_dollars, 0),
-                        regime=regime.regime,
-                    )
-                    print(
-                        f"  ✅ [{gate_tag}] {sym}  unified={unified:.1f} cat={cat_score:.0f} quant={qm.quant_score:.0f}  "
-                        f"mom30={qm.momentum_30m*100:+.2f}% vol_accel={qm.volume_accel:.2f} "
-                        f"RS30mΔ={qm.rel_strength_vs_spy*100:+.2f}% atr%={qm.atr_percent*100:.2f}% "
-                        f"adv=${qm.adv20_dollars/1e6:.0f}M playbook={qm.playbook_score:.0f} n={qm.playbook_sample_size_5d}"
-                    )
+                        bounce_pass = False
+                        bounce_reason = ""
+                        if not hs_pass and ENABLE_BOUNCE_MODE and regime.regime in ("GREEN", "YELLOW"):
+                            bounce_reject_reasons = []
+                            playbook_sample = max(0, int(getattr(qm, "playbook_sample_size_5d", 0) or 0))
 
-                    # ====== USE QUANT METRICS for price/ATR ======
-                    px = qm.price
-                    atr = qm.atr14
-                    # Sync ATR cache from quant verification
-                    if atr > 0:
-                        atr_cache[sym] = atr
-                    if not math.isfinite(atr) or atr <= 0:
-                        continue
+                            if playbook_sample < BOUNCE_MIN_SAMPLE_SIZE:
+                                # Informational only — log but do NOT gate.
+                                # Fresh system has zero history; blocking bounce on sample size
+                                # makes the fallback path permanently unreachable.
+                                print(
+                                    f"[BOUNCE_INFO] {sym}: playbook_n {playbook_sample} < min {BOUNCE_MIN_SAMPLE_SIZE} "
+                                    f"(informational — not gating)")
 
-                    # ====== CALCULATE SIZING ======
-                    risk_dollars = equity * risk_per_trade_pct
-                    qty = int(risk_dollars // atr)
-                    if qty <= 0:
-                        continue
+                            if qm.price < CFG_PRICE_MIN:
+                                bounce_reject_reasons.append(f"price ${qm.price:.2f} < min ${CFG_PRICE_MIN}")
+                            if qm.price > CFG_PRICE_MAX and sym not in PRICE_MAX_ALLOWLIST:
+                                bounce_reject_reasons.append(f"price ${qm.price:.2f} > max ${CFG_PRICE_MAX}")
+                            if qm.atr_percent < MIN_ATR_PCT:
+                                bounce_reject_reasons.append(f"atr% {qm.atr_percent:.3f} < {MIN_ATR_PCT}")
+                            if qm.adv20_dollars < MIN_ADV20_DOLLARS:
+                                bounce_reject_reasons.append(
+                                    f"adv20 ${qm.adv20_dollars/1e6:.1f}M < ${MIN_ADV20_DOLLARS/1e6:.0f}M"
+                                )
+                            if qm.playbook_win_rate_5d < BOUNCE_MIN_PLAYBOOK_WIN_RATE:
+                                bounce_reject_reasons.append(
+                                    f"playbook_wr {qm.playbook_win_rate_5d*100:.1f}% < {BOUNCE_MIN_PLAYBOOK_WIN_RATE*100:.1f}%"
+                                )
+                            if qm.playbook_expectancy_5d < BOUNCE_MIN_PLAYBOOK_EXPECTANCY:
+                                bounce_reject_reasons.append(
+                                    f"playbook_exp {qm.playbook_expectancy_5d*100:+.2f}% < {BOUNCE_MIN_PLAYBOOK_EXPECTANCY*100:+.2f}%"
+                                )
+                            if qm.playbook_score < BOUNCE_MIN_PLAYBOOK_SCORE:
+                                bounce_reject_reasons.append(
+                                    f"playbook_score {qm.playbook_score:.1f} < {BOUNCE_MIN_PLAYBOOK_SCORE:.1f}"
+                                )
+                            if abs(min(0.0, qm.playbook_mae_5d)) > BOUNCE_MAX_MAE_ABS:
+                                bounce_reject_reasons.append(
+                                    f"playbook_mae {qm.playbook_mae_5d*100:+.2f}% worse than -{BOUNCE_MAX_MAE_ABS*100:.2f}%"
+                                )
 
-                    entry = px * (1 - ENTRY_OFFSET_PCT)
-                    stop_loss = entry - (STOP_LOSS_R * atr)
-                    trail_amt = 0.0  # Delayed trailing stop activation
-                    trail_activate_px = entry + (TRAIL_ACTIVATE_ATR * atr)
+                            if not bounce_reject_reasons:
+                                bounce_pass = True
+                                bounce_reason = (
+                                    f"[BOUNCE_PASS] {sym}: "
+                                    f"wr={qm.playbook_win_rate_5d*100:.1f}% exp={qm.playbook_expectancy_5d*100:+.2f}% "
+                                    f"score={qm.playbook_score:.1f} mae={qm.playbook_mae_5d*100:+.2f}% n={playbook_sample} "
+                                    f"atr%={qm.atr_percent*100:.2f}% adv=${qm.adv20_dollars/1e6:.0f}M regime={regime.regime}"
+                                )
+                            else:
+                                bounce_reason = f"[BOUNCE_REJECT] {' | '.join(bounce_reject_reasons)}"
+
+                        if not hs_pass and bounce_pass:
+                            gate_tag = "BOUNCE"
+                            gate_reason = bounce_reason
+                            gate_pass = True
+
+                        if not gate_pass:
+                            last_hyper_reject_ts[sym] = now
+                            last_hyper_reject_reason[sym] = f"{hs_reason} || {bounce_reason}" if bounce_reason else hs_reason
+                            tracker.hyper_rejections.append({"symbol": sym, "reason": hs_reason})
+                            print(f"[HYPER_FILTER] {sym}: {hs_reason}")
+                            if bounce_reason:
+                                tracker.bounce_rejections.append({"symbol": sym, "reason": bounce_reason})
+                                print(f"[BOUNCE_FILTER] {sym}: {bounce_reason}")
+                            continue
+                        last_hyper_reject_ts.pop(sym, None)
+                        last_hyper_reject_reason.pop(sym, None)
+                        print(gate_reason)
+
+                        # ---- Unified score ----
+                        unified = (UNIFIED_CATALYST_WEIGHT * cat_score
+                                   + UNIFIED_QUANT_WEIGHT * qm.quant_score)
+                        if gate_tag == "BOUNCE":
+                            required_unified = BOUNCE_MIN_UNIFIED_SCORE
+                        else:
+                            required_unified = CONVICTION_MIN_UNIFIED_SCORE if conviction_mode else BASE_MIN_UNIFIED_SCORE
+                        if unified < required_unified:
+                            tracker.score_rejections.append({
+                                "symbol": sym,
+                                "reason": f"unified {unified:.1f} < {required_unified:.1f} ({gate_tag})",
+                            })
+                            print(
+                                f"[SCORE] {sym}: unified={unified:.1f} < {required_unified:.1f} "
+                                f"(mode={gate_tag} cat={cat_score:.0f} quant={qm.quant_score:.0f})"
+                            )
+                            continue
+
+                        # ---- Candidate summary ----
+                        dist_analyzer.record_signal(sym, unified, cat_score,
+                                                   qm.quant_score, gate_tag, qm)
+                        tracker.signals.append({
+                            "symbol": sym, "unified_score": round(unified, 1),
+                            "catalyst_score": round(cat_score, 0),
+                            "quant_score": round(qm.quant_score, 0),
+                            "gate": gate_tag,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
+                        lifecycle.emit(OrderEvent.SIGNAL_SCORE, sym,
+                                      unified_score=round(unified, 1),
+                                      catalyst_score=round(cat_score, 0),
+                                      quant_score=round(qm.quant_score, 0),
+                                      gate=gate_tag)
+                        journal.create_trade_record(
+                            sym,
+                            unified_score=round(unified, 1),
+                            catalyst_score=round(cat_score, 0),
+                            quant_score=round(qm.quant_score, 0),
+                            gate_type=gate_tag,
+                            vol_accel=round(qm.volume_accel, 3),
+                            atr_pct=round(qm.atr_percent, 6),
+                            rs_30m_delta=round(qm.rel_strength_vs_spy, 6),
+                            momentum_30m=round(qm.momentum_30m, 6),
+                            adv20_dollars=round(qm.adv20_dollars, 0),
+                            regime=regime.regime,
+                        )
+                        print(
+                            f"  ✅ [{gate_tag}] {sym}  unified={unified:.1f} cat={cat_score:.0f} quant={qm.quant_score:.0f}  "
+                            f"mom30={qm.momentum_30m*100:+.2f}% vol_accel={qm.volume_accel:.2f} "
+                            f"RS30mΔ={qm.rel_strength_vs_spy*100:+.2f}% atr%={qm.atr_percent*100:.2f}% "
+                            f"adv=${qm.adv20_dollars/1e6:.0f}M playbook={qm.playbook_score:.0f} n={qm.playbook_sample_size_5d}"
+                        )
+
+                        # ====== USE QUANT METRICS for price/ATR ======
+                        px = qm.price
+                        atr = qm.atr14
+                        # Sync ATR cache from quant verification
+                        if atr > 0:
+                            atr_cache[sym] = atr
+                        if not math.isfinite(atr) or atr <= 0:
+                            continue
+
+                        # ====== CALCULATE SIZING ======
+                        risk_dollars = equity * risk_per_trade_pct
+                        qty = int(risk_dollars // atr)
+                        if qty <= 0:
+                            continue
+
+                        entry = px * (1 - ENTRY_OFFSET_PCT)
+                        stop_loss = entry - (STOP_LOSS_R * atr)
+                        trail_amt = 0.0  # Delayed trailing stop activation
+                        trail_activate_px = entry + (TRAIL_ACTIVATE_ATR * atr)
                     
-                    # Triple-check before submission
-                    if not math.isfinite(entry) or entry <= 0:
-                        print(f"[VALIDATION] {sym}: entry price invalid (${entry})")
-                        continue
+                        # Triple-check before submission
+                        if not math.isfinite(entry) or entry <= 0:
+                            print(f"[VALIDATION] {sym}: entry price invalid (${entry})")
+                            continue
                     
-                    if not math.isfinite(stop_loss) or stop_loss <= 0:
-                        print(f"[VALIDATION] {sym}: stop loss invalid (${stop_loss})")
-                        continue
+                        if not math.isfinite(stop_loss) or stop_loss <= 0:
+                            print(f"[VALIDATION] {sym}: stop loss invalid (${stop_loss})")
+                            continue
 
-                    if atr <= 0:
-                        print(f"[VALIDATION] {sym}: ATR invalid ({atr})")
-                        continue
+                        if atr <= 0:
+                            print(f"[VALIDATION] {sym}: ATR invalid ({atr})")
+                            continue
                     
-                    if qty <= 0:
-                        print(f"[VALIDATION] {sym}: qty invalid ({qty})")
-                        continue
+                        if qty <= 0:
+                            print(f"[VALIDATION] {sym}: qty invalid ({qty})")
+                            continue
 
-                    # ---- Log trade intent ----
-                    dist_analyzer.record_intent(sym, entry, risk_per_trade_pct, qm)
-                    tracker.intents.append({
-                        "symbol": sym, "qty": qty,
-                        "entry": round(entry, 2), "stop": round(stop_loss, 2),
-                        "trail_activate": round(trail_activate_px, 2),
-                        "risk_pct": round(risk_per_trade_pct, 4),
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-                    lifecycle.emit(OrderEvent.TRADE_INTENT_CREATED, sym,
-                                  qty=qty, entry_price=round(entry, 2),
-                                  stop_price=round(stop_loss, 2),
-                                  risk_pct=round(risk_per_trade_pct, 4))
-                    journal.record_intent(
-                        sym, qty=qty, entry_limit=round(entry, 2),
-                        stop_price=round(stop_loss, 2),
-                        trail_activation_price=round(trail_activate_px, 2),
-                        risk_pct=round(risk_per_trade_pct, 4),
-                    )
+                        # ---- Log trade intent ----
+                        dist_analyzer.record_intent(sym, entry, risk_per_trade_pct, qm)
+                        tracker.intents.append({
+                            "symbol": sym, "qty": qty,
+                            "entry": round(entry, 2), "stop": round(stop_loss, 2),
+                            "trail_activate": round(trail_activate_px, 2),
+                            "risk_pct": round(risk_per_trade_pct, 4),
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
+                        lifecycle.emit(OrderEvent.TRADE_INTENT_CREATED, sym,
+                                      qty=qty, entry_price=round(entry, 2),
+                                      stop_price=round(stop_loss, 2),
+                                      risk_pct=round(risk_per_trade_pct, 4))
+                        journal.record_intent(
+                            sym, qty=qty, entry_limit=round(entry, 2),
+                            stop_price=round(stop_loss, 2),
+                            trail_activation_price=round(trail_activate_px, 2),
+                            risk_pct=round(risk_per_trade_pct, 4),
+                        )
 
-                    # ====== CHECK DAILY KILL SWITCH ======
-                    if is_kill_switch_active(ib):
-                        tracker.risk_rejected.append({"symbol": sym, "reason": "kill_switch_daily_loss"})
-                        lifecycle.emit(OrderEvent.RISK_REJECTED, sym,
-                                      message="kill_switch_daily_loss")
-                        continue
+                        # ====== CHECK DAILY KILL SWITCH ======
+                        if is_kill_switch_active(ib):
+                            tracker.risk_rejected.append({"symbol": sym, "reason": "kill_switch_daily_loss"})
+                            lifecycle.emit(OrderEvent.RISK_REJECTED, sym,
+                                          message="kill_switch_daily_loss")
+                            continue
                     
-                    # ====== CHECK THROTTLE: COOLDOWN PER SYMBOL ======
-                    last_bracket_time = last_bracket_ts.get(sym, 0.0)
-                    if now - last_bracket_time < COOLDOWN_SECONDS_PER_SYMBOL:
-                        cooldown_remain = COOLDOWN_SECONDS_PER_SYMBOL - (now - last_bracket_time)
-                        print(f"[THROTTLE] {sym}: cooldown active ({cooldown_remain:.0f}s remaining)")
-                        continue
+                        # ====== LOSS-TRIGGERED COOLDOWN (per-symbol) ======
+                        # Only blocks re-entry after a LOSING exit on this symbol.
+                        # Winning/flat exits never set this. No blanket cooldown.
+                        loss_cd_until = loss_cooldown_until.get(sym, 0.0)
+                        if now < loss_cd_until:
+                            cooldown_remain = loss_cd_until - now
+                            print(f"[LOSS_COOLDOWN] {sym}: post-loss cooldown active ({cooldown_remain:.0f}s remaining)")
+                            continue
 
-                    # ====== CHECK THROTTLE: GLOBAL BRACKET COOLDOWN ======
-                    if BRACKET_COOLDOWN_SECONDS > 0 and (now - last_bracket_attempt_ts) < BRACKET_COOLDOWN_SECONDS:
-                        cooldown_remain = BRACKET_COOLDOWN_SECONDS - (now - last_bracket_attempt_ts)
-                        print(f"[THROTTLE] Bracket cooldown active ({cooldown_remain:.0f}s remaining)")
-                        break
+                        # ====== CHECK THROTTLE: MAX PER LOOP ======
+                        if brackets_submitted_this_loop >= MAX_NEW_BRACKETS_PER_LOOP:
+                            print(f"[THROTTLE] {sym}: max {MAX_NEW_BRACKETS_PER_LOOP} bracket(s) per loop reached")
+                            break
                     
-                    # ====== CHECK THROTTLE: MAX 1 PER LOOP ======
-                    if brackets_submitted_this_loop >= MAX_NEW_BRACKETS_PER_LOOP:
-                        print(f"[THROTTLE] {sym}: max {MAX_NEW_BRACKETS_PER_LOOP} bracket(s) per loop reached")
-                        break
+                        # ====== CHECK SYMBOL LOCK: NO DUPLICATE ENTRIES ======
+                        locked, lock_reason = is_symbol_locked(ib, sym, symbol_lock_ts, now, SYMBOL_COOLDOWN_SECONDS)
+                        if locked:
+                            print(f"[LOCK] {sym}: {lock_reason}, skipping")
+                            continue
                     
-                    # ====== CHECK SYMBOL LOCK: NO DUPLICATE ENTRIES ======
-                    locked, lock_reason = is_symbol_locked(ib, sym, symbol_lock_ts, now, SYMBOL_COOLDOWN_SECONDS)
-                    if locked:
-                        print(f"[LOCK] {sym}: {lock_reason}, skipping")
-                        continue
-                    
-                    # ---- Risk check passed ----
-                    tracker.risk_approved.append({
-                        "symbol": sym, "qty": qty,
-                        "entry": round(entry, 2), "stop": round(stop_loss, 2),
-                        "open_risk_pct": round(open_risk_pct, 4),
-                        "filled_risk_pct": round(filled_risk_pct, 4),
-                        "pending_risk_pct": round(pending_risk_pct, 4),
-                        "regime": regime.regime,
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-                    lifecycle.emit(OrderEvent.RISK_APPROVED, sym,
-                                  qty=qty, entry_price=round(entry, 2),
-                                  stop_price=round(stop_loss, 2),
-                                  risk_pct=round(open_risk_pct, 4))
+                        # ---- Risk check passed ----
+                        tracker.risk_approved.append({
+                            "symbol": sym, "qty": qty,
+                            "entry": round(entry, 2), "stop": round(stop_loss, 2),
+                            "open_risk_pct": round(open_risk_pct, 4),
+                            "filled_risk_pct": round(filled_risk_pct, 4),
+                            "pending_risk_pct": round(pending_risk_pct, 4),
+                            "regime": regime.regime,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
+                        lifecycle.emit(OrderEvent.RISK_APPROVED, sym,
+                                      qty=qty, entry_price=round(entry, 2),
+                                      stop_price=round(stop_loss, 2),
+                                      risk_pct=round(open_risk_pct, 4))
 
-                    # ====== SIM MODE ======
-                    if not armed:
+                        # ====== SIM MODE ======
+                        if not armed:
+                            tracker.orders_placed.append({
+                                "symbol": sym, "qty": qty,
+                                "entry": round(entry, 2), "stop": round(stop_loss, 2),
+                                "ok": True, "message": "SIM",
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                            })
+                            lifecycle.emit(OrderEvent.ORDER_PLACED, sym,
+                                          qty=qty, entry_price=round(entry, 2),
+                                          stop_price=round(stop_loss, 2),
+                                          status="SIM")
+                            journal.record_order_submitted(
+                                sym, status="submitted_unfilled")
+                            print(
+                                f"[SIM] {sym} unified={unified:.0f} qty={qty} entry=${entry:.2f} stop=${stop_loss:.2f} "
+                                f"trail=PENDING (>{trail_activate_px:.2f}) risk={risk_per_trade_pct:.3%}"
+                            )
+                            last_bracket_attempt_ts = now
+                            symbol_lock_ts[sym] = now  # Lock immediately after attempt
+                            brackets_submitted_this_loop += 1
+                            break
+
+                        # ====== SUBMIT BRACKET (ARMED MODE) ======
+                        params = BracketParams(
+                            symbol=sym, qty=qty,
+                            entry_limit=entry, stop_loss=stop_loss, trail_amount=trail_amt,
+                            tif="DAY"
+                        )
+                        res = place_limit_tp_trail_bracket(ib, params)
+                        _parent = getattr(res, 'parent_id', None)
+                        _stop = getattr(res, 'stop_id', None)
+                        _trail = getattr(res, 'trail_id', None)
+                        _degraded = getattr(res, 'degraded', False)
+                        if _degraded:
+                            tracker.degraded_brackets += 1
+                        _rth = is_regular_trading_hours()
+                        _order_status = "WORKING" if _rth else "QUEUED_NEXT_SESSION"
                         tracker.orders_placed.append({
                             "symbol": sym, "qty": qty,
                             "entry": round(entry, 2), "stop": round(stop_loss, 2),
-                            "ok": True, "message": "SIM",
+                            "ok": res.ok, "message": res.message,
+                            "parent_id": _parent, "stop_id": _stop, "trail_id": _trail,
+                            "degraded": _degraded, "status": _order_status,
                             "ts": datetime.now(timezone.utc).isoformat(),
                         })
-                        lifecycle.emit(OrderEvent.ORDER_PLACED, sym,
-                                      qty=qty, entry_price=round(entry, 2),
-                                      stop_price=round(stop_loss, 2),
-                                      status="SIM")
-                        journal.record_order_submitted(
-                            sym, status="submitted_unfilled")
-                        print(
-                            f"[SIM] {sym} unified={unified:.0f} qty={qty} entry=${entry:.2f} stop=${stop_loss:.2f} "
-                            f"trail=PENDING (>{trail_activate_px:.2f}) risk={risk_per_trade_pct:.3%}"
-                        )
+                        if res.ok:
+                            lifecycle.emit(OrderEvent.ORDER_PLACED, sym,
+                                          qty=qty, entry_price=round(entry, 2),
+                                          stop_price=round(stop_loss, 2),
+                                          parent_id=_parent, stop_id=_stop,
+                                          trail_id=_trail, status=_order_status)
+                            journal.record_order_submitted(
+                                sym, parent_id=_parent, stop_id=_stop,
+                                trail_id=_trail, degraded=_degraded,
+                                queued=not _rth,
+                                status="submitted_unfilled")
+                            if _degraded:
+                                lifecycle.emit(OrderEvent.BRACKET_DEGRADED, sym,
+                                              parent_id=_parent, stop_id=_stop,
+                                              trail_id=_trail,
+                                              message="child leg failed")
+                            if _rth:
+                                lifecycle.emit(OrderEvent.ORDER_WORKING, sym,
+                                              order_id=_parent, status="Submitted")
+                            else:
+                                lifecycle.emit(OrderEvent.ORDER_QUEUED_NEXT_SESSION, sym,
+                                              qty=qty, entry_price=round(entry, 2),
+                                              message="DAY order queued outside RTH")
+                                print(f"  [QUEUED] {sym}: DAY order queued for next regular session")
+                            if _parent:
+                                lifecycle.register_order(sym, _parent)
+                        else:
+                            tracker.errors.append({"type": "order_rejected", "symbol": sym,
+                                                   "message": res.message,
+                                                   "ts": datetime.now(timezone.utc).isoformat()})
+                            lifecycle.emit(OrderEvent.SYSTEM_ERROR, sym,
+                                          message=f"order_rejected: {res.message}")
+                        print(f"[IB] {sym} -> {res.ok} {res.message}")
                         last_bracket_attempt_ts = now
-                        symbol_lock_ts[sym] = now  # Lock immediately after attempt
+                        symbol_lock_ts[sym] = now  # Lock immediately after attempt (success or fail)
                         brackets_submitted_this_loop += 1
+                    
+                        if res.ok:
+                            active.add(sym)
+                            last_bracket_ts[sym] = now
+                            stop_order_ids[sym] = getattr(res, 'stop_id', None) or 0
+                            entry_atr_by_symbol[sym] = atr
+                            if loss_streak_penalty_remaining > 0:
+                                loss_streak_penalty_remaining -= 1
+
+                        # After one attempt (success or fail), do not attempt more symbols this loop
                         break
 
-                    # ====== SUBMIT BRACKET (ARMED MODE) ======
-                    params = BracketParams(
-                        symbol=sym, qty=qty,
-                        entry_limit=entry, stop_loss=stop_loss, trail_amount=trail_amt,
-                        tif="DAY"
-                    )
-                    res = place_limit_tp_trail_bracket(ib, params)
-                    _parent = getattr(res, 'parent_id', None)
-                    _stop = getattr(res, 'stop_id', None) or getattr(res, 'tp_id', None)
-                    _trail = getattr(res, 'trail_id', None)
-                    _degraded = getattr(res, 'degraded', False)
-                    if _degraded:
-                        tracker.degraded_brackets += 1
-                    _rth = is_regular_trading_hours()
-                    _order_status = "WORKING" if _rth else "QUEUED_NEXT_SESSION"
-                    tracker.orders_placed.append({
-                        "symbol": sym, "qty": qty,
-                        "entry": round(entry, 2), "stop": round(stop_loss, 2),
-                        "ok": res.ok, "message": res.message,
-                        "parent_id": _parent, "stop_id": _stop, "trail_id": _trail,
-                        "degraded": _degraded, "status": _order_status,
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-                    if res.ok:
-                        lifecycle.emit(OrderEvent.ORDER_PLACED, sym,
-                                      qty=qty, entry_price=round(entry, 2),
-                                      stop_price=round(stop_loss, 2),
-                                      parent_id=_parent, stop_id=_stop,
-                                      trail_id=_trail, status=_order_status)
-                        journal.record_order_submitted(
-                            sym, parent_id=_parent, stop_id=_stop,
-                            trail_id=_trail, degraded=_degraded,
-                            queued=not _rth,
-                            status="submitted_unfilled")
-                        if _degraded:
-                            lifecycle.emit(OrderEvent.BRACKET_DEGRADED, sym,
-                                          parent_id=_parent, stop_id=_stop,
-                                          trail_id=_trail,
-                                          message="child leg failed")
-                        if _rth:
-                            lifecycle.emit(OrderEvent.ORDER_WORKING, sym,
-                                          order_id=_parent, status="Submitted")
-                        else:
-                            lifecycle.emit(OrderEvent.ORDER_QUEUED_NEXT_SESSION, sym,
-                                          qty=qty, entry_price=round(entry, 2),
-                                          message="DAY order queued outside RTH")
-                            print(f"  [QUEUED] {sym}: DAY order queued for next regular session")
-                        if _parent:
-                            lifecycle.register_order(sym, _parent)
-                    else:
-                        tracker.errors.append({"type": "order_rejected", "symbol": sym,
-                                               "message": res.message,
-                                               "ts": datetime.now(timezone.utc).isoformat()})
-                        lifecycle.emit(OrderEvent.SYSTEM_ERROR, sym,
-                                      message=f"order_rejected: {res.message}")
-                    print(f"[IB] {sym} -> {res.ok} {res.message}")
-                    last_bracket_attempt_ts = now
-                    symbol_lock_ts[sym] = now  # Lock immediately after attempt (success or fail)
-                    brackets_submitted_this_loop += 1
-                    
-                    if res.ok:
-                        active.add(sym)
-                        last_bracket_ts[sym] = now
-                        stop_order_ids[sym] = getattr(res, 'stop_id', None) or getattr(res, 'tp_id', None) or 0
-                        entry_atr_by_symbol[sym] = atr
-                        if loss_streak_penalty_remaining > 0:
-                            loss_streak_penalty_remaining -= 1
-
-                    # After one attempt (success or fail), do not attempt more symbols this loop
-                    break
-
                 last_symbols = current_symbols
-                last_print_ts = now
+                if should_print:
+                    last_print_ts = now
 
-            _write_dashboard()
-            elapsed = time.time() - loop_start
-            time.sleep(max(0.0, LOOP_SECONDS - elapsed))
+                _write_dashboard()
+                elapsed = time.time() - loop_start
+                time.sleep(max(0.0, LOOP_SECONDS - elapsed))
+            except KeyboardInterrupt:
+                raise
+            except Exception as loop_err:
+                # P1: never let a transient per-iteration error kill the
+                # session with open positions. Log, brief sleep, continue.
+                import traceback as _tb
+                print(f"[LOOP_ERROR] iteration failed: {loop_err}")
+                _tb.print_exc()
+                try:
+                    _write_dashboard()
+                except Exception:
+                    pass
+                time.sleep(max(1.0, LOOP_SECONDS - (time.time() - loop_start)))
+                continue
 
     except KeyboardInterrupt:
         print("\nStopping live loop.")

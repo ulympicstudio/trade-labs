@@ -271,21 +271,42 @@ def compute_candidate_metrics(
 
 # ── Hyper-swing gate ───────────────────────────────────────────────────────
 
+# Authoritative price-band / universe constants live in config/risk_limits.py.
+# Read from there so the validator and the live loop agree (the validator
+# previously hard-coded PRICE_MAX=250 and a divergent allowlist).
+try:
+    from config.risk_limits import (
+        PRICE_MIN as _CFG_PRICE_MIN,
+        PRICE_MAX as _CFG_PRICE_MAX,
+        MIN_ATR_PCT as _CFG_MIN_ATR_PCT,
+        MIN_ADV20_DOLLARS as _CFG_MIN_ADV20_DOLLARS,
+        MIN_VOLUME_ACCEL as _CFG_MIN_VOLUME_ACCEL,
+        MIN_RS_VS_SPY as _CFG_MIN_RS_VS_SPY,
+        PRICE_MAX_ALLOWLIST as _CFG_PRICE_MAX_ALLOWLIST,
+    )
+except Exception:  # pragma: no cover - fallback if config import fails
+    _CFG_PRICE_MIN, _CFG_PRICE_MAX = 2.0, 500.0
+    _CFG_MIN_ATR_PCT = 0.008
+    _CFG_MIN_ADV20_DOLLARS = 25_000_000
+    _CFG_MIN_VOLUME_ACCEL = 1.3
+    _CFG_MIN_RS_VS_SPY = 0.0025
+    _CFG_PRICE_MAX_ALLOWLIST = {"NVDA", "META", "AAPL", "TSLA", "PLTR", "PANW", "MSFT", "AMZN", "SPY", "QQQ"}
+
 # Default thresholds (overridable via config dict)
 _DEFAULTS = dict(
-    PRICE_MIN=2.0,
-    PRICE_MAX=250.0,
-    MIN_ATR_PCT=0.008,
-    MIN_ADV20_DOLLARS=25_000_000,
-    MIN_VOLUME_ACCEL=1.3,
-    MIN_RS_VS_SPY=0.0025,
+    PRICE_MIN=float(_CFG_PRICE_MIN),
+    PRICE_MAX=float(_CFG_PRICE_MAX),
+    MIN_ATR_PCT=_CFG_MIN_ATR_PCT,
+    MIN_ADV20_DOLLARS=_CFG_MIN_ADV20_DOLLARS,
+    MIN_VOLUME_ACCEL=_CFG_MIN_VOLUME_ACCEL,
+    MIN_RS_VS_SPY=_CFG_MIN_RS_VS_SPY,
     TIER2_MIN_VOLUME_ACCEL=1.15,
     TIER2_MAX_VOLUME_ACCEL=1.30,
     TIER2_MIN_RS_VS_SPY=0.0045,
     TIER2_MIN_MOMENTUM_30M=0.004,
     TIER2_MIN_TREND_STRUCTURE=75.0,
     REQUIRE_ABOVE_VWAP=True,
-    PRICE_MAX_ALLOWLIST={"NVDA", "META", "AAPL", "TSLA", "PLTR", "PANW", "MSFT", "AMZN"},
+    PRICE_MAX_ALLOWLIST=set(_CFG_PRICE_MAX_ALLOWLIST),
 )
 
 
