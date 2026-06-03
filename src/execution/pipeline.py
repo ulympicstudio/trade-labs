@@ -1,3 +1,10 @@
+"""DEPRECATED legacy paper-execution shim — used only by tests.
+
+The canonical execution path is the arms bus (risk_main → execution_main →
+``src.execution.bracket_orders.place_limit_tp_trail_bracket``). This module
+predates the bus and is retained only for ``src/signals/test_signal_engine.py``.
+"""
+
 from datetime import date
 from typing import Optional
 

@@ -1,3 +1,13 @@
+"""DEPRECATED order helper — retained for SIM and legacy callers only.
+
+The canonical broker-submission path is the single bracket builder in
+``src.execution.bracket_orders.place_limit_tp_trail_bracket`` (LIMIT entry +
+OCA-linked STOP, verified by broker ack). Both arms execution handlers
+(_on_order_plan when EXECUTION_ENABLED, and _on_order_blueprint) route through
+it. ``place_order`` is no longer on the live arms path; it remains for the SIM
+backend and the test-only ``src.execution.pipeline`` shim.
+"""
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional

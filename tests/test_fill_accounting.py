@@ -105,6 +105,70 @@ def test_confirmed_fill_records_fill(exec_main, monkeypatch):
     assert "live_filled" in statuses
 
 
+def _order_plan():
+    from src.schemas.messages import OrderPlan
+    return OrderPlan(
+        symbol="AAPL",
+        intent_id="i1",
+        qty=10,
+        entry_type="LMT",
+        limit_prices=[100.0],
+        stop_price=95.0,
+        trail_params={"side": "BUY", "trail_pct": 1.0, "total_risk": 50.0},
+    )
+
+
+def test_order_plan_live_routes_through_bracket_unfilled(exec_main, monkeypatch):
+    """An approved OrderPlan submits via the single bracket builder, not
+    place_order; an unfilled entry must not be booked as a fill."""
+    em = exec_main
+    ib = FakeIB(default_status="Submitted")
+    fills, exits, attribs, events = _wire(monkeypatch, em, ib, confirmed=False)
+    # place_order must NOT be invoked on the live path.
+    import src.execution.orders as orders_mod
+    called = []
+    monkeypatch.setattr(orders_mod, "place_order",
+                        lambda *a, **k: called.append(1), raising=False)
+
+    em._on_order_plan(_order_plan())
+
+    assert called == [], "live OrderPlan must not call legacy place_order"
+    assert fills == [], "submission must not record a fill"
+    statuses = [getattr(e, "status", None) for e in events]
+    assert "submitted_unfilled" in statuses
+    assert "live_filled" not in statuses
+
+
+def test_order_plan_live_confirmed_fill_records(exec_main, monkeypatch):
+    em = exec_main
+    ib = FakeIB(default_status="Submitted")
+    fills, exits, attribs, events = _wire(monkeypatch, em, ib, confirmed=True)
+
+    em._on_order_plan(_order_plan())
+
+    assert len(fills) == 1
+    assert len(exits) == 1
+    assert len(attribs) == 1
+    statuses = [getattr(e, "status", None) for e in events]
+    assert "live_filled" in statuses
+
+
+def test_bracket_params_from_plan_and_blueprint():
+    from src.execution.bracket_orders import BracketParams
+    plan = _order_plan()
+    p = BracketParams.from_plan(plan)
+    assert p.entry_limit == 100.0
+    assert p.stop_loss == 95.0
+    assert p.trail_amount == 1.0  # 100.0 * 1.0%
+    assert p.qty == 10
+
+    bp = _blueprint()
+    b = BracketParams.from_blueprint(bp)
+    assert b.entry_limit == 100.0  # mid of [99,100,101]
+    assert b.stop_loss == 95.0
+    assert b.qty == 10
+
+
 def test_confirm_parent_filled_helper(exec_main):
     em = exec_main
     ib = FakeIB(default_status="Submitted")

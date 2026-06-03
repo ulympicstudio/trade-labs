@@ -122,6 +122,100 @@ def connect_broker(ib: Any) -> None:
 
 # ── Order handler ────────────────────────────────────────────────────
 
+def _submit_order_plan_live(plan: OrderPlan) -> None:
+    """Submit an approved OrderPlan via the canonical bracket builder.
+
+    Used only when EXECUTION_ENABLED and a broker connection is present.
+    Mirrors the OrderBlueprint live path: LIMIT entry + STOP bracket, with
+    fill accounting (kill-switch ledger, exit-intel, attribution) gated on a
+    CONFIRMED Filled status — never on submission alone.
+    """
+    from src.execution.bracket_orders import (
+        BracketParams, place_limit_tp_trail_bracket,
+    )
+
+    params = BracketParams.from_plan(plan)
+    if params.entry_limit <= 0:
+        log.error("No valid entry price for %s — rejecting", plan.symbol)
+        _publish_event(OrderEvent(
+            symbol=plan.symbol, event_type="REJECTED",
+            status="bad_entry_price", message="limit_prices empty or <= 0",
+        ))
+        _ks_record_failed()
+        return
+
+    side = plan.trail_params.get("side", "BUY")
+    log.info(
+        "BRACKET_SUBMIT symbol=%s qty=%d entry=%.2f stop=%.2f trail=$%.2f source=order_plan",
+        plan.symbol, params.qty, params.entry_limit, params.stop_loss,
+        params.trail_amount,
+    )
+    result = place_limit_tp_trail_bracket(_ib, params)
+    log.info(
+        "BRACKET_RESULT symbol=%s ok=%s parent=%s stop=%s degraded=%s msg=%s",
+        plan.symbol, result.ok, result.parent_id, result.stop_id,
+        result.degraded, result.message,
+    )
+
+    fill_confirmed, filled_qty, avg_fill_px = _confirm_parent_filled(
+        _ib, result.parent_id, plan.qty, params.entry_limit,
+    )
+
+    if result.ok and not fill_confirmed:
+        _publish_event(OrderEvent(
+            symbol=plan.symbol, event_type="WORKING", status="submitted_unfilled",
+            filled_qty=0, avg_fill_price=params.entry_limit,
+            order_id=str(result.parent_id or ""),
+            message=(f"entry working (not filled) parent={result.parent_id} "
+                     f"stop={result.stop_id} degraded={result.degraded}"),
+        ))
+        return
+
+    if result.ok and fill_confirmed:
+        entry_price = avg_fill_px or params.entry_limit
+        _ks_record_fill(plan.symbol, filled_qty or plan.qty, entry_price, pnl=0.0)
+        _tp = plan.trail_params
+        if _EXIT_ENABLED:
+            _exit_register(
+                symbol=plan.symbol, side=side, entry_price=entry_price,
+                qty=plan.qty, stop_price=plan.stop_price,
+                trail_pct=_tp.get("trail_pct", 1.5),
+                risk_usd=_tp.get("total_risk", 0.0),
+                playbook=_tp.get("playbook", ""), sector=_tp.get("sector", ""),
+                industry=_tp.get("industry", ""), regime=_tp.get("regime", ""),
+                market_mode=_tp.get("market_mode", ""),
+                volatility_state=_tp.get("volatility_state", ""),
+                scorecard_bias=_tp.get("scorecard_bias", 1.0),
+                intent_id=plan.intent_id,
+            )
+        if _ATTRIB_ENABLED:
+            _attrib_open(
+                symbol=plan.symbol, side=side, entry_price=entry_price,
+                qty=plan.qty, risk_usd=_tp.get("total_risk", 0.0),
+                playbook=_tp.get("playbook", ""), sector=_tp.get("sector", ""),
+                industry=_tp.get("industry", ""), regime=_tp.get("regime", ""),
+                market_mode=_tp.get("market_mode", ""),
+                volatility_state=_tp.get("volatility_state", ""),
+                scorecard_bias=_tp.get("scorecard_bias", 1.0),
+                intent_id=plan.intent_id,
+            )
+            _attrib_fill(plan.symbol, entry_price, plan.qty)
+        _publish_event(OrderEvent(
+            symbol=plan.symbol, event_type="FILLED", status="live_filled",
+            filled_qty=filled_qty or plan.qty, avg_fill_price=entry_price,
+            order_id=str(result.parent_id or ""),
+            message=(f"parent={result.parent_id} stop={result.stop_id} "
+                     f"degraded={result.degraded}"),
+        ))
+        return
+
+    _ks_record_failed()
+    _publish_event(OrderEvent(
+        symbol=plan.symbol, event_type="REJECTED", status="bracket_failed",
+        message=result.message[:200],
+    ))
+
+
 def _on_order_plan(plan: OrderPlan) -> None:
     """Handle an approved order plan from the bus."""
     global _orders_processed
@@ -155,6 +249,18 @@ def _on_order_plan(plan: OrderPlan) -> None:
             "forced_session_override session_gate session=%s forced=%s symbol=%s",
             session, get_test_force_session(), plan.symbol,
         )
+
+    # ── Live broker submission: route through the SINGLE bracket builder ──
+    # When execution is enabled and a broker connection is injected, an
+    # approved OrderPlan (always entry_type=LMT + stop_price from the risk
+    # arm) is submitted via the canonical LIMIT-entry + STOP bracket — the
+    # same routine the OrderBlueprint path uses. This replaces the legacy
+    # place_order() MarketOrder path, which ignored the planned limit price.
+    if _EXECUTION_ENABLED and _ib is not None:
+        _submit_order_plan_live(plan)
+        with _lock:
+            _orders_processed += 1
+        return
 
     # ── 1. Import adapter layer ──────────────────────────────────────
     try:
@@ -549,17 +655,9 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
         _ks_record_failed()
         return
 
-    # Convert trail_pct to a dollar amount relative to entry
-    trail_amount = round(entry_price * (bp.trail_pct / 100.0), 2)
-
-    params = BracketParams(
-        symbol=bp.symbol,
-        qty=bp.qty,
-        entry_limit=round(entry_price, 2),
-        stop_loss=round(bp.stop_price, 2),
-        trail_amount=trail_amount,
-        tif="DAY",
-    )
+    # Canonical param construction (shared with the OrderPlan path).
+    params = BracketParams.from_blueprint(bp)
+    trail_amount = params.trail_amount
 
     log.info(
         "BRACKET_SUBMIT symbol=%s qty=%d entry=%.2f stop=%.2f trail=$%.2f direction=%s",
