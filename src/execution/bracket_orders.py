@@ -1,11 +1,20 @@
 import logging
+import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional
 
 from ib_insync import IB, Stock, LimitOrder, Order, StopOrder
 
+from config.runtime import is_paper, is_armed
+
 log = logging.getLogger("bracket_orders")
+
+# Order statuses that indicate IB has accepted a leg into its book.
+_ACCEPTED_STATUSES = {"PreSubmitted", "Submitted", "Filled"}
+
+# Fallback tick size when contract minTick is unavailable.
+_DEFAULT_TICK = 0.01
 
 
 @dataclass
@@ -13,8 +22,9 @@ class BracketParams:
     symbol: str
     qty: int
     entry_limit: float
-    stop_loss: float  # Hard downside protection (OCA child A)
-    trail_amount: float  # Upside capture (OCA child B)
+    stop_loss: float  # Hard downside protection (STOP child)
+    trail_amount: float  # Retained for API compatibility; trailing stop is
+    # attached AFTER a confirmed fill via place_trailing_stop(), NOT at entry.
     tif: str = "DAY"
 
 
@@ -22,13 +32,13 @@ class BracketParams:
 class BracketResult:
     """Canonical result of a bracket order submission.
 
-    Fields:
-        ok       – True if the bracket was accepted by the broker.
-        message  – Human-readable status string.
-        parent_id – Order ID of the entry (LMT BUY) leg.
-        stop_id  – Order ID of the stop-loss (STP SELL) child.
-        trail_id – Order ID of the trailing-stop (TRAIL SELL) child.
-        degraded – True if one child leg failed but entry was accepted.
+    The entry bracket is intentionally TWO legs only:
+        parent  – LIMIT BUY entry leg.
+        stop    – STOP SELL hard downside protection (the genuinely last,
+                  transmitted leg).
+
+    There is NO take-profit limit leg. Upside is captured by a trailing
+    stop attached after a confirmed fill (see place_trailing_stop()).
     """
     ok: bool
     message: str
@@ -37,151 +47,177 @@ class BracketResult:
     trail_id: Optional[int] = None
     degraded: bool = False
 
-    def __getattr__(self, name: str):
-        # Backward-compatible alias: tp_id -> stop_id
-        if name == "tp_id":
-            return self.stop_id
-        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
-
 
 def _contract(symbol: str) -> Stock:
     return Stock(symbol, "SMART", "USD")
 
 
+def _min_tick(ib: IB, contract) -> float:
+    """Return the contract's minimum tick, falling back to 0.01."""
+    try:
+        details = ib.reqContractDetails(contract)
+        if details:
+            tick = float(getattr(details[0], "minTick", 0.0) or 0.0)
+            if tick > 0:
+                return tick
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("reqContractDetails failed for %s: %s", contract.symbol, exc)
+    return _DEFAULT_TICK
+
+
+def _round_to_tick(price: float, tick: float) -> float:
+    """Round a price to the nearest valid tick increment."""
+    if tick <= 0:
+        tick = _DEFAULT_TICK
+    return round(round(price / tick) * tick, 10)
+
+
+def _leg_accepted(trade) -> bool:
+    """True if IB has acknowledged the leg (by status or trade log).
+
+    We deliberately do NOT trust order.orderId, which ib_insync assigns
+    locally on placeOrder() regardless of broker acceptance.
+    """
+    try:
+        status = trade.orderStatus.status
+    except Exception:
+        status = None
+    if status in _ACCEPTED_STATUSES:
+        return True
+    # Some accepted legs only surface via the trade log before status updates.
+    try:
+        for entry in trade.log:
+            if getattr(entry, "status", None) in _ACCEPTED_STATUSES:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _cancel_legs(ib: IB, trades: List, symbol: str) -> None:
+    """Cancel every already-placed leg (not just the parent)."""
+    for tr in trades:
+        if tr is None:
+            continue
+        try:
+            ib.cancelOrder(tr.order)
+        except Exception as exc:
+            log.error("bracket_cancel_failed symbol=%s err=%s", symbol, exc)
+    try:
+        ib.sleep(0.3)
+    except Exception:
+        pass
+
+
 def place_limit_tp_trail_bracket(
     ib: IB,
     p: BracketParams,
-    oca_group: Optional[str] = None
+    oca_group: Optional[str] = None,
 ) -> BracketResult:
-    """
-    Bracket with stop loss, optionally with trailing stop child:
-      - Parent: BUY LMT at entry (transmit=False)
-      - Child A: SELL STP at stop_loss (hard downside, transmit depends on trail)
-      - Child B (optional): SELL TRAIL (upside capture, only if trail_amount > 0)
+    """Place a TWO-leg entry bracket: LIMIT BUY parent + STOP SELL child.
 
-    When trail_amount <= 0 the bracket is a 2-leg (parent + stop) and the
-    trailing stop is expected to be activated later via place_trailing_stop()
-    after the entry fills and price appreciates.
+    Design (owner decision):
+      - Parent: BUY LMT at entry (transmit=False).
+      - Child:  SELL STP at stop_loss, parentId set, OCA group with
+                ocaType=1, transmit=True (the genuinely LAST leg).
+      - NO take-profit limit leg.
+      - The trailing stop is attached LATER, on confirmed fill, via
+        place_trailing_stop(). It is NOT sent here against an unfilled parent.
+
+    Acceptance is verified via trade.orderStatus.status / trade.log, not
+    by reading the locally-assigned order.orderId. If a leg is not accepted,
+    ALL already-placed legs are cancelled and the result is degraded.
+
+    Refuses to run unless an explicit armed/paper flag is set.
     """
+    # ── Armed / paper guard ──────────────────────────────────────────
+    # Never silently place against a live-capable gateway.
+    if not is_armed():
+        return BracketResult(
+            ok=False,
+            message="BLOCKED: TRADE_LABS_ARMED=0. Set TRADE_LABS_ARMED=1 to place brackets.",
+        )
+    if not is_paper():
+        return BracketResult(
+            ok=False,
+            message="BLOCKED: LIVE mode. Bracket placement refused (paper account only).",
+        )
+
+    placed: List = []
     try:
         c = _contract(p.symbol)
         ib.qualifyContracts(c)
-        log.debug("Contract qualified: %s, secType=%s, conId=%s", c.symbol, c.secType, c.conId)
+        tick = _min_tick(ib, c)
+        log.debug(
+            "Contract qualified: %s secType=%s conId=%s minTick=%s",
+            c.symbol, c.secType, c.conId, tick,
+        )
 
-        include_trail = p.trail_amount > 0
-
-        if oca_group is None and include_trail:
+        if oca_group is None:
             oca_group = f"OCA_{p.symbol}_{int(time.time())}"
 
-        # Parent (entry)
-        parent = LimitOrder("BUY", p.qty, round(p.entry_limit, 2))
+        entry_px = _round_to_tick(p.entry_limit, tick)
+        stop_px = _round_to_tick(p.stop_loss, tick)
+
+        # ── Parent (entry) — not the last leg, do not transmit yet ──
+        parent = LimitOrder("BUY", p.qty, entry_px)
         parent.tif = p.tif
         parent.transmit = False
-
         trade_parent = ib.placeOrder(c, parent)
+        placed.append(trade_parent)
         ib.sleep(0.2)
         parent_id = parent.orderId
-        log.debug("Parent BUY order: id=%s, qty=%s, LMT=%.2f", parent_id, p.qty, p.entry_limit)
+        log.debug("Parent BUY: id=%s qty=%s LMT=%.4f", parent_id, p.qty, entry_px)
 
-        # Child A: STOP order for downside protection
-        stop_loss_order = StopOrder("SELL", p.qty, round(p.stop_loss, 2))
-        stop_loss_order.parentId = parent_id
-        stop_loss_order.tif = p.tif
-        # If no trail child follows, this is the last leg and must transmit.
-        stop_loss_order.transmit = not include_trail
-        if include_trail:
-            stop_loss_order.ocaGroup = oca_group
-            stop_loss_order.ocaType = 1  # CANCEL_WITH_BLOCK
+        # ── Child: STOP (the last leg → transmit=True) ──
+        stop_order = StopOrder("SELL", p.qty, stop_px)
+        stop_order.parentId = parent_id
+        stop_order.tif = p.tif
+        stop_order.ocaGroup = oca_group
+        stop_order.ocaType = 1  # CANCEL_WITH_BLOCK
+        stop_order.transmit = True
+        trade_stop = ib.placeOrder(c, stop_order)
+        placed.append(trade_stop)
+        ib.sleep(0.3)
+        stop_id = stop_order.orderId
+        log.debug(
+            "STOP SELL: id=%s qty=%s STP=%.4f parentId=%s",
+            stop_id, p.qty, stop_px, parent_id,
+        )
 
-        trade_stop_loss = ib.placeOrder(c, stop_loss_order)
-        ib.sleep(0.2)
-        stop_loss_id = stop_loss_order.orderId
-        log.debug("STOP LOSS order: id=%s, qty=%s, STP=$%.2f, parentId=%s", stop_loss_id, p.qty, p.stop_loss, parent_id)
+        # ── Verify acceptance via broker ack, NOT local orderId ──
+        bad = []
+        if not _leg_accepted(trade_parent):
+            bad.append("parent")
+        if not _leg_accepted(trade_stop):
+            bad.append("stop")
 
-        trail_id = None
-
-        if include_trail:
-            # Child B: Trailing stop
-            trail = Order()
-            trail.action = "SELL"
-            trail.totalQuantity = p.qty
-            trail.orderType = "TRAIL"
-            trail.auxPrice = float(round(p.trail_amount, 2))  # trailing amount in $
-            # trailStopPrice: initial stop reference for child orders.
-            # IB requires this for TRAIL children attached to an unfilled parent.
-            trail.trailStopPrice = float(round(p.entry_limit - p.trail_amount, 2))
-            trail.parentId = parent_id
-            trail.tif = p.tif
-            trail.ocaGroup = oca_group
-            trail.ocaType = 1
-            trail.transmit = True  # final child transmits whole bracket
-            trail.eTradeOnly = False
-            trail.firmQuoteOnly = False
-
-            log.debug("TRAIL Order: auxPrice=%s, trailStopPrice=%s, parentId=%s", trail.auxPrice, trail.trailStopPrice, parent_id)
-
-            # Capture IB error events during trail placement
-            trail_errors = []
-            def capture_trail_error(*args):
-                trail_errors.append(args)
-                if len(args) > 2:
-                    log.warning("TRAIL error %s: %s", args[1], args[2])
-
-            ib.errorEvent += capture_trail_error
-            trade_trail = ib.placeOrder(c, trail)
-            ib.sleep(0.2)
-            ib.errorEvent -= capture_trail_error
-
-            trail_id = trail.orderId
-            log.debug("TRAIL order: id=%s, errors=%s", trail_id, len(trail_errors))
-        else:
-            log.debug("No trail child (trail_amount=%s); 2-leg bracket submitted.", p.trail_amount)
-
-        # Detect degraded bracket (entry ok but a child leg failed)
-        _degraded = False
-        _parts = []
-        if stop_loss_id in (0, None):
-            _degraded = True
-            _parts.append("stop_loss")
-        if include_trail and trail_id in (0, None):
-            _degraded = True
-            _parts.append("trail")
-
-        _msg = "Bracket submitted to IB (paper)."
-        if not include_trail:
-            _msg = "2-leg bracket submitted (parent + stop); trail deferred."
-        if _degraded:
-            _msg += f" DEGRADED: missing child legs {_parts}"
+        if bad:
             log.warning(
-                "bracket_degraded symbol=%s missing=%s parent_id=%s — cancelling parent",
-                p.symbol, _parts, parent_id,
+                "bracket_degraded symbol=%s not_accepted=%s — cancelling all legs",
+                p.symbol, bad,
             )
-            # Cancel the parent order to prevent an unprotected position
-            try:
-                ib.cancelOrder(trade_parent.order)
-                ib.sleep(0.3)
-                log.warning("bracket_parent_cancelled symbol=%s parent_id=%s", p.symbol, parent_id)
-            except Exception as cancel_err:
-                log.error("bracket_cancel_failed symbol=%s err=%s", p.symbol, cancel_err)
+            _cancel_legs(ib, placed, p.symbol)
             return BracketResult(
                 ok=False,
-                message=_msg,
+                message=f"DEGRADED: legs not accepted by IB: {bad}; all legs cancelled.",
                 parent_id=parent_id,
-                stop_id=stop_loss_id,
-                trail_id=trail_id,
+                stop_id=stop_id,
                 degraded=True,
             )
 
         return BracketResult(
             ok=True,
-            message=_msg,
+            message="2-leg bracket accepted (parent LMT + STOP); trail attaches on fill.",
             parent_id=parent_id,
-            stop_id=stop_loss_id,
-            trail_id=trail_id,
+            stop_id=stop_id,
             degraded=False,
         )
     except Exception as e:
         log.exception("Bracket placement failed for %s", p.symbol)
+        # Best-effort cleanup of anything already placed.
+        if placed:
+            _cancel_legs(ib, placed, p.symbol)
         return BracketResult(ok=False, message=f"Bracket failed: {e}")
 
 
@@ -192,29 +228,55 @@ def place_trailing_stop(
     trail_amount: float,
     tif: str = "DAY",
 ) -> BracketResult:
-    """Place a standalone trailing-stop SELL order (no bracket parent).
+    """Place a standalone trailing-stop SELL order AFTER a position is open.
 
-    This is a backwards-compatible alias used by live_loop_10s to attach a
-    trailing stop *after* a position is already open.
+    This is the canonical upside-capture path: call it once the entry has a
+    confirmed fill. The trailing amount is rounded to the contract minTick.
+
+    Refuses to run unless an explicit armed/paper flag is set.
     """
+    if not is_armed():
+        return BracketResult(
+            ok=False,
+            message="BLOCKED: TRADE_LABS_ARMED=0. Set TRADE_LABS_ARMED=1 to place trailing stop.",
+        )
+    if not is_paper():
+        return BracketResult(
+            ok=False,
+            message="BLOCKED: LIVE mode. Trailing stop refused (paper account only).",
+        )
     try:
         c = _contract(symbol)
         ib.qualifyContracts(c)
+        tick = _min_tick(ib, c)
+        trail_aux = _round_to_tick(float(trail_amount), tick)
+        if not math.isfinite(trail_aux) or trail_aux <= 0:
+            return BracketResult(
+                ok=False, message=f"Invalid trail amount {trail_amount}"
+            )
         trail_order = Order(
             action="SELL",
             orderType="TRAIL",
             totalQuantity=qty,
-            auxPrice=trail_amount,
+            auxPrice=trail_aux,
             tif=tif,
             transmit=True,
         )
         trade = ib.placeOrder(c, trail_order)
-        ib.sleep(0.5)
-        trail_id = trade.order.orderId
+        ib.sleep(0.3)
+        if not _leg_accepted(trade):
+            try:
+                ib.cancelOrder(trade.order)
+            except Exception:
+                pass
+            return BracketResult(
+                ok=False,
+                message=f"Trailing stop not accepted by IB for {symbol}",
+            )
         return BracketResult(
             ok=True,
             message=f"Trailing stop placed for {symbol}",
-            trail_id=trail_id,
+            trail_id=trade.order.orderId,
         )
     except Exception as e:
         return BracketResult(ok=False, message=f"Trailing stop failed: {e}")

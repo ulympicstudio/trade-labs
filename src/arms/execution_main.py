@@ -321,6 +321,45 @@ def _on_order_plan(plan: OrderPlan) -> None:
         _orders_processed += 1
 
 
+# ── Fill confirmation ──────────────────────────────────────────────
+
+_FILL_CONFIRM_WAIT_S = float(os.environ.get("TL_EXEC_FILL_CONFIRM_WAIT_S", "2.0"))
+
+
+def _confirm_parent_filled(ib: Any, parent_id, expected_qty: int,
+                           fallback_px: float):
+    """Return (filled, filled_qty, avg_fill_price) for the entry order.
+
+    Inspects the IB connection's trades for the parent order and reports a
+    fill ONLY when the order status is ``Filled`` (or has filled shares).
+    Submission/working states return filled=False so callers never book a
+    submission as a fill. Returns (False, 0, 0.0) when the order cannot be
+    located or no connection is available.
+    """
+    if ib is None or parent_id in (None, 0):
+        return (False, 0, 0.0)
+    try:
+        ib.sleep(_FILL_CONFIRM_WAIT_S)
+    except Exception:
+        pass
+    try:
+        trades = ib.trades()
+    except Exception:
+        return (False, 0, 0.0)
+    for tr in trades:
+        order = getattr(tr, "order", None)
+        if order is None or getattr(order, "orderId", None) != parent_id:
+            continue
+        st = getattr(tr, "orderStatus", None)
+        status = getattr(st, "status", None) if st is not None else None
+        filled = float(getattr(st, "filled", 0.0) or 0.0) if st is not None else 0.0
+        avg_px = float(getattr(st, "avgFillPrice", 0.0) or 0.0) if st is not None else 0.0
+        if status == "Filled" or filled > 0:
+            return (True, int(filled) or expected_qty, avg_px or fallback_px)
+        return (False, 0, 0.0)
+    return (False, 0, 0.0)
+
+
 # ── OrderBlueprint handler ─────────────────────────────────────────
 
 def _on_order_blueprint(bp: OrderBlueprint) -> None:
@@ -535,8 +574,33 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
         result.trail_id, result.degraded, result.message,
     )
 
-    if result.ok:
-        _ks_record_fill(bp.symbol, bp.qty, entry_price, pnl=0.0)
+    # ── P1: submission is NOT a fill ──────────────────────────────────
+    # A LIMIT BUY entry that is merely accepted/working must not be booked
+    # as an open position. Fill accounting (kill-switch ledger, exit-intel
+    # registration, attribution, scorecard) is gated on a CONFIRMED Filled
+    # status from IB. An unfilled-but-working entry publishes WORKING only.
+    fill_confirmed, filled_qty, avg_fill_px = _confirm_parent_filled(
+        _ib, result.parent_id, bp.qty, entry_price,
+    )
+
+    if result.ok and not fill_confirmed:
+        _publish_event(OrderEvent(
+            symbol=bp.symbol,
+            event_type="WORKING",
+            status="submitted_unfilled",
+            filled_qty=0,
+            avg_fill_price=entry_price,
+            order_id=str(result.parent_id or ""),
+            message=(
+                f"entry working (not filled) parent={result.parent_id} "
+                f"stop={result.stop_id} degraded={result.degraded}"
+            ),
+        ))
+        return
+
+    if result.ok and fill_confirmed:
+        entry_price = avg_fill_px or entry_price
+        _ks_record_fill(bp.symbol, filled_qty or bp.qty, entry_price, pnl=0.0)
         if _EXIT_ENABLED:
             _exit_register(
                 symbol=bp.symbol,
@@ -576,9 +640,9 @@ def _on_order_blueprint(bp: OrderBlueprint) -> None:
                 )
         _publish_event(OrderEvent(
             symbol=bp.symbol,
-            event_type="BRACKET_READY",
-            status="live_submitted",
-            filled_qty=bp.qty,
+            event_type="FILLED",
+            status="live_filled",
+            filled_qty=filled_qty or bp.qty,
             avg_fill_price=entry_price,
             order_id=str(result.parent_id or ""),
             message=(
